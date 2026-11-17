@@ -1,6 +1,8 @@
 import express from 'express';
+import { getStore } from '@netlify/blobs';
 import {
   createHash,
+  createHmac,
   randomBytes,
   randomUUID,
   scrypt as scryptCallback,
@@ -15,10 +17,16 @@ const app = express();
 const scrypt = promisify(scryptCallback);
 const AUTH_COOKIE = 'kivoz_auth';
 const SESSION_DURATION = 30 * 24 * 60 * 60 * 1000;
+const VOICE_MODEL_LIMIT = 120 * 1024 * 1024;
+const VOICE_STORAGE_LIMIT = 500 * 1024 * 1024;
+const VOICE_CONFIG_LIMIT = 2 * 1024 * 1024;
+const VOICE_CHUNK_SIZE = 4 * 1024 * 1024;
 const DEFAULT_SETTINGS = {
   channel: '',
+  tiktokChannel: '',
   command: '!aa',
   voice: '',
+  voiceRules: [],
   rate: 1,
   pitch: 1,
   volume: 0.8,
@@ -122,6 +130,16 @@ const requireAdmin = (req, res, next) => {
 const validUsername = value => typeof value === 'string' && /^[a-zA-Z0-9._-]{3,32}$/.test(value);
 const validPassword = value => typeof value === 'string' && value.length >= 12 && value.length <= 128;
 const publicUser = ({ id, username, role }) => ({ id, username, role });
+const piperStore = () => getStore({ name: 'kivoz-piper-voices', consistency: 'strong' });
+const voicePrefix = id => `voices/${id}`;
+const validVoiceId = id => /^[a-f0-9-]{36}$/i.test(id);
+const expectedChunkSize = (size, index) => Math.min(VOICE_CHUNK_SIZE, size - index * VOICE_CHUNK_SIZE);
+const validPiperConfig = config => config && typeof config === 'object'
+  && Number.isInteger(config.audio?.sample_rate) && config.audio.sample_rate > 0
+  && config.phoneme_id_map && typeof config.phoneme_id_map === 'object'
+  && config.inference && typeof config.inference === 'object'
+  && Number.isInteger(config.num_speakers) && config.num_speakers > 0
+  && typeof config.language?.code === 'string' && config.language.code.length <= 32;
 
 app.get('/api/auth/status', async (req, res) => {
   try {
@@ -247,7 +265,16 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 
 app.put('/api/settings', requireAuth, async (req, res) => {
   const s = req.body;
-  if (!s || typeof s.channel !== 'string' || !/^[a-zA-Z0-9_-]{0,60}$/.test(s.channel) || typeof s.command !== 'string' || !/^\S{1,20}$/.test(s.command) || typeof s.voice !== 'string' || s.voice.length > 300 || typeof s.blocked !== 'string' || s.blocked.length > 2000 || !['all', 'subscribers', 'moderators'].includes(s.audience) || !['rate', 'pitch', 'volume', 'cooldown', 'maxLength'].every(k => Number.isFinite(s[k])) || s.rate < 0.5 || s.rate > 2 || s.pitch < 0.5 || s.pitch > 2 || s.volume < 0 || s.volume > 1 || s.cooldown < 0 || s.cooldown > 60 || s.maxLength < 20 || s.maxLength > 500 || !['dark', 'light'].includes(s.theme)) {
+  const validVoiceRule = rule => rule && typeof rule.id === 'string' && rule.id.length <= 36
+    && ['username', 'role', 'subscriber', 'donor'].includes(rule.type)
+    && ['all', 'kick', 'tiktok'].includes(rule.platform)
+    && typeof rule.voice === 'string' && rule.voice.length > 0 && rule.voice.length <= 300
+    && (rule.type === 'username'
+      ? typeof rule.value === 'string' && /^[a-zA-Z0-9._-]{1,32}$/.test(rule.value)
+      : rule.type === 'role'
+        ? ['moderator', 'broadcaster'].includes(rule.value)
+        : rule.value === '');
+  if (!s || typeof s.channel !== 'string' || !/^[a-zA-Z0-9_-]{0,60}$/.test(s.channel) || typeof s.tiktokChannel !== 'string' || !/^[a-zA-Z0-9._]{0,24}$/.test(s.tiktokChannel) || typeof s.command !== 'string' || !/^\S{1,20}$/.test(s.command) || typeof s.voice !== 'string' || s.voice.length > 300 || !Array.isArray(s.voiceRules) || s.voiceRules.length > 30 || !s.voiceRules.every(validVoiceRule) || typeof s.blocked !== 'string' || s.blocked.length > 2000 || !['all', 'subscribers', 'moderators'].includes(s.audience) || !['rate', 'pitch', 'volume', 'cooldown', 'maxLength'].every(k => Number.isFinite(s[k])) || s.rate < 0.5 || s.rate > 2 || s.pitch < 0.5 || s.pitch > 2 || s.volume < 0 || s.volume > 1 || s.cooldown < 0 || s.cooldown > 60 || s.maxLength < 20 || s.maxLength > 500 || !['dark', 'light'].includes(s.theme)) {
     return res.status(400).json({ error: 'Revisa los ajustes e inténtalo de nuevo.' });
   }
   const settings = Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(key => [key, s[key]]));
@@ -265,6 +292,226 @@ app.put('/api/settings', requireAuth, async (req, res) => {
   } catch {
     res.status(503).json({ error: 'No se han podido guardar los ajustes. Inténtalo de nuevo.' });
   }
+});
+
+app.get('/api/voices', requireAuth, async (req, res) => {
+  try {
+    const store = piperStore();
+    const { blobs = [] } = await store.list({ prefix: 'voices/' });
+    const manifests = blobs.filter(blob => blob.key.endsWith('/manifest.json'));
+    const voices = (await Promise.all(manifests.map(blob => store.get(blob.key, { type: 'json' }))))
+      .filter(Boolean)
+      .map(({ id, name, language, numSpeakers, modelSize, chunks }) => ({
+        id, name, language, numSpeakers, modelSize, chunks,
+        voiceURI: `piper:${id}`,
+        lang: language,
+        localService: true,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+    res.json({ voices });
+  } catch {
+    res.status(503).json({ error: 'No se pudieron cargar las voces compartidas.' });
+  }
+});
+
+app.get('/api/voices/:id/config', requireAuth, async (req, res) => {
+  if (!validVoiceId(req.params.id)) return res.status(400).json({ error: 'La voz indicada no es válida.' });
+  try {
+    const store = piperStore();
+    const manifest = await store.get(`${voicePrefix(req.params.id)}/manifest.json`, { type: 'json' });
+    if (!manifest) return res.status(404).json({ error: 'La voz ya no está disponible.' });
+    const config = await store.get(`${voicePrefix(req.params.id)}/config.json`, { type: 'json' });
+    if (!config) return res.status(404).json({ error: 'No se encontró la configuración de esta voz.' });
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json(config);
+  } catch {
+    res.status(503).json({ error: 'No se pudo cargar la configuración de la voz.' });
+  }
+});
+
+app.get('/api/voices/:id/model/:chunk', requireAuth, async (req, res) => {
+  if (!validVoiceId(req.params.id) || !/^\d{1,6}$/.test(req.params.chunk)) {
+    return res.status(400).json({ error: 'El fragmento del modelo no es válido.' });
+  }
+  try {
+    const store = piperStore();
+    const manifest = await store.get(`${voicePrefix(req.params.id)}/manifest.json`, { type: 'json' });
+    const index = Number(req.params.chunk);
+    if (!manifest) return res.status(404).json({ error: 'La voz ya no está disponible.' });
+    if (!Number.isInteger(index) || index < 0 || index >= manifest.chunks) {
+      return res.status(404).json({ error: 'No se encontró el fragmento del modelo.' });
+    }
+    const chunk = await store.get(`${voicePrefix(req.params.id)}/model/${String(index).padStart(6, '0')}`, { type: 'arrayBuffer' });
+    if (!chunk) return res.status(404).json({ error: 'No se encontró el fragmento del modelo.' });
+    res.set('Content-Type', 'application/octet-stream');
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(Buffer.from(chunk));
+  } catch {
+    res.status(503).json({ error: 'No se pudo descargar el modelo de voz.' });
+  }
+});
+
+app.post('/api/admin/voices', requireAuth, requireAdmin, async (req, res) => {
+  const { name, modelSize } = req.body || {};
+  if (typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 60
+    || !Number.isSafeInteger(modelSize) || modelSize < 1 || modelSize > VOICE_MODEL_LIMIT) {
+    return res.status(400).json({ error: 'El nombre o el tamaño del modelo no son válidos. El modelo debe pesar hasta 120 MB.' });
+  }
+  try {
+    const store = piperStore();
+    const { blobs = [] } = await store.list({ prefix: 'voices/' });
+    const pendingCount = blobs.filter(blob => blob.key.endsWith('/pending.json')).length;
+    const records = blobs.filter(blob => blob.key.endsWith('/manifest.json') || blob.key.endsWith('/pending.json'));
+    const storedVoices = await Promise.all(records.map(blob => store.get(blob.key, { type: 'json' })));
+    const voiceCount = blobs.filter(blob => blob.key.endsWith('/manifest.json')).length;
+    if (pendingCount + voiceCount >= 50) return res.status(409).json({ error: 'Se alcanzó el límite de 50 voces. Elimina una voz o carga pendiente antes de continuar.' });
+    const storedBytes = storedVoices.reduce((total, voice) => total + (Number.isSafeInteger(voice?.modelSize) ? voice.modelSize : 0), 0);
+    if (storedBytes + modelSize > VOICE_STORAGE_LIMIT) return res.status(409).json({ error: 'La biblioteca alcanzaría el límite compartido de 500 MB. Elimina un modelo antes de cargar otro.' });
+    const id = randomUUID();
+    const chunks = Math.ceil(modelSize / VOICE_CHUNK_SIZE);
+    await store.setJSON(`${voicePrefix(id)}/pending.json`, {
+      id,
+      name: name.trim(),
+      modelSize,
+      chunks,
+    }, { onlyIfNew: true });
+    res.status(201).json({ id, chunkSize: VOICE_CHUNK_SIZE, chunks });
+  } catch {
+    res.status(503).json({ error: 'No se pudo iniciar la carga de la voz.' });
+  }
+});
+
+app.put('/api/admin/voices/:id/config', requireAuth, requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: VOICE_CONFIG_LIMIT }),
+  async (req, res) => {
+    if (!validVoiceId(req.params.id) || !Buffer.isBuffer(req.body) || req.body.length < 1) {
+      return res.status(400).json({ error: 'El archivo de configuración no es válido.' });
+    }
+    try {
+      const store = piperStore();
+      const pending = await store.get(`${voicePrefix(req.params.id)}/pending.json`, { type: 'json' });
+      if (!pending) return res.status(404).json({ error: 'No se encontró una carga pendiente para esta voz.' });
+      if (req.body.length > VOICE_CONFIG_LIMIT) return res.status(413).json({ error: 'El archivo de configuración no puede superar 2 MB.' });
+      const bytes = req.body;
+      await store.set(`${voicePrefix(req.params.id)}/config-upload.json`, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      res.json({ ok: true });
+    } catch {
+      res.status(503).json({ error: 'No se pudo guardar la configuración de la voz.' });
+    }
+  });
+
+app.put('/api/admin/voices/:id/model/:chunk', requireAuth, requireAdmin,
+  express.raw({ type: 'application/octet-stream', limit: VOICE_CHUNK_SIZE }),
+  async (req, res) => {
+    if (!validVoiceId(req.params.id) || !/^\d{1,6}$/.test(req.params.chunk) || !Buffer.isBuffer(req.body)) {
+      return res.status(400).json({ error: 'El fragmento del modelo no es válido.' });
+    }
+    try {
+      const store = piperStore();
+      const pending = await store.get(`${voicePrefix(req.params.id)}/pending.json`, { type: 'json' });
+      const index = Number(req.params.chunk);
+      if (!pending) return res.status(404).json({ error: 'No se encontró una carga pendiente para esta voz.' });
+      if (!Number.isInteger(index) || index < 0 || index >= pending.chunks
+        || req.body.length !== expectedChunkSize(pending.modelSize, index)) {
+        return res.status(400).json({ error: 'El tamaño o número del fragmento del modelo no es válido.' });
+      }
+      const bytes = req.body;
+      const key = `${voicePrefix(req.params.id)}/model/${String(index).padStart(6, '0')}`;
+      await store.set(key, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      await store.setJSON(`${voicePrefix(req.params.id)}/uploaded/${String(index).padStart(6, '0')}.json`, { size: bytes.length });
+      res.json({ ok: true });
+    } catch {
+      res.status(503).json({ error: 'No se pudo guardar el fragmento del modelo.' });
+    }
+  });
+
+app.post('/api/admin/voices/:id/complete', requireAuth, requireAdmin, async (req, res) => {
+  if (!validVoiceId(req.params.id)) return res.status(400).json({ error: 'La voz indicada no es válida.' });
+  try {
+    const store = piperStore();
+    const prefix = voicePrefix(req.params.id);
+    const pending = await store.get(`${prefix}/pending.json`, { type: 'json' });
+    if (!pending) return res.status(404).json({ error: 'No se encontró una carga pendiente para esta voz.' });
+    const configText = await store.get(`${prefix}/config-upload.json`);
+    if (!configText) return res.status(409).json({ error: 'Falta el archivo de configuración `.onnx.json`.' });
+    if (Buffer.byteLength(configText, 'utf8') > VOICE_CONFIG_LIMIT) {
+      return res.status(413).json({ error: 'El archivo de configuración no puede superar 2 MB.' });
+    }
+    let config;
+    try {
+      config = JSON.parse(configText);
+    } catch {
+      return res.status(400).json({ error: 'El archivo de configuración debe ser un JSON válido.' });
+    }
+    if (!validPiperConfig(config)) {
+      return res.status(400).json({ error: 'La configuración no parece compatible con Piper. Revisa el archivo `.onnx.json`.' });
+    }
+    for (let index = 0; index < pending.chunks; index++) {
+      const suffix = String(index).padStart(6, '0');
+      const uploaded = await store.get(`${prefix}/uploaded/${suffix}.json`, { type: 'json' });
+      if (uploaded?.size !== expectedChunkSize(pending.modelSize, index)) {
+        return res.status(409).json({ error: `Falta el fragmento ${index + 1} de ${pending.chunks} del modelo.` });
+      }
+    }
+    await store.set(`${prefix}/config.json`, configText);
+    await store.setJSON(`${prefix}/manifest.json`, {
+      id: pending.id,
+      name: pending.name,
+      language: config.language.code,
+      numSpeakers: config.num_speakers,
+      sampleRate: config.audio.sample_rate,
+      modelSize: pending.modelSize,
+      chunks: pending.chunks,
+    });
+    await store.delete(`${prefix}/pending.json`);
+    await store.delete(`${prefix}/config-upload.json`);
+    for (let index = 0; index < pending.chunks; index++) {
+      await store.delete(`${prefix}/uploaded/${String(index).padStart(6, '0')}.json`);
+    }
+    res.status(201).json({ voice: {
+      id: pending.id,
+      name: pending.name,
+      language: config.language.code,
+      numSpeakers: config.num_speakers,
+      sampleRate: config.audio.sample_rate,
+      modelSize: pending.modelSize,
+      chunks: pending.chunks,
+      voiceURI: `piper:${pending.id}`,
+      lang: config.language.code,
+      localService: true,
+    } });
+  } catch {
+    res.status(503).json({ error: 'No se pudo finalizar la carga de la voz.' });
+  }
+});
+
+app.delete('/api/admin/voices/:id', requireAuth, requireAdmin, async (req, res) => {
+  if (!validVoiceId(req.params.id)) return res.status(400).json({ error: 'La voz indicada no es válida.' });
+  try {
+    const store = piperStore();
+    const prefix = `${voicePrefix(req.params.id)}/`;
+    const { blobs = [] } = await store.list({ prefix });
+    if (!blobs.length) return res.status(404).json({ error: 'No se encontró esa voz o carga pendiente.' });
+    await Promise.all(blobs.map(blob => store.delete(blob.key)));
+    res.json({ ok: true });
+  } catch {
+    res.status(503).json({ error: 'No se pudo eliminar la voz.' });
+  }
+});
+
+app.post('/api/tiktok/connect-token', requireAuth, requireAdmin, async (req, res) => {
+  const secret = process.env.KIVOZ_TIKTOK_SERVICE_SECRET;
+  if (typeof secret !== 'string' || secret.length < 32) {
+    return res.status(503).json({ error: 'El servicio TikTok no está configurado. Revisa KIVOZ_TIKTOK_SERVICE_SECRET en el servidor.' });
+  }
+  const claims = {
+    sub: req.user.id,
+    exp: Date.now() + 60_000,
+    nonce: randomBytes(18).toString('base64url'),
+  };
+  const encoded = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  const signature = createHmac('sha256', secret).update(encoded).digest('base64url');
+  res.json({ token: `${encoded}.${signature}` });
 });
 
 app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
