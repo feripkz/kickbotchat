@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Pusher from 'pusher-js';
-import { AudioLines, LayoutDashboard, Mic2, SlidersHorizontal, ListFilter, Radio, ArrowUpRight, ArrowRight, ChevronDown, ChevronRight, Check, CircleHelp, Play, Pause, SkipForward, Trash2, X, MessageSquare, Link2, ShieldCheck, Save, Settings2, Headphones, CheckCheck, LoaderCircle } from 'lucide-react';
+import { AudioLines, LayoutDashboard, Mic2, SlidersHorizontal, ListFilter, Radio, ArrowUpRight, ArrowRight, ChevronDown, ChevronRight, Check, CircleHelp, Play, Pause, SkipForward, Trash2, X, MessageSquare, Link2, ShieldCheck, Save, Settings2, Headphones, CheckCheck, LoaderCircle, Moon, Sun, LogOut, Users, UserPlus } from 'lucide-react';
 import './styles.css';
 
 const defaults = { channel: '', command: '!aa', voice: '', rate: 1, pitch: 1, volume: .8, readName: true, skipLinks: true, skipEmotes: true, cooldown: 3, maxLength: 200, blocked: '', audience: 'all' };
@@ -10,10 +10,84 @@ const time = () => new Date().toLocaleTimeString('es', { hour: '2-digit', minute
 const Range = ({ settings, patch, label, prop, min, max, step, unit = '×', display }) => <div className="range-field"><div><label htmlFor={prop}>{label}</label><span>{display || `${Number(settings[prop]).toFixed(1)}${unit}`}</span></div><input id={prop} type="range" min={min} max={max} step={step} value={settings[prop]} style={{ '--fill': `${(settings[prop] - min) / (max - min) * 100}%` }} onChange={e => patch(prop, +e.target.value)}/></div>;
 const Toggle = ({ settings, patch, label, detail, prop }) => <label className="toggle-row"><span><strong>{label}</strong>{detail && <small>{detail}</small>}</span><input type="checkbox" checked={settings[prop]} onChange={e => patch(prop, e.target.checked)}/><i aria-hidden="true"/></label>;
 const VoiceCard = ({ selectedVoice, patch, voice, index }) => <button className={`voice-choice ${selectedVoice?.voiceURI === voice.voiceURI ? 'selected' : ''}`} aria-pressed={selectedVoice?.voiceURI === voice.voiceURI} onClick={() => patch('voice', voice.voiceURI)}><div className={`voice-avatar avatar-${index % 3}`}><AudioLines size={23}/></div><strong>{voice.name.replace(/Microsoft |Google /g, '').split(' - ')[0]}</strong><small>{voice.lang} · {voice.localService ? 'Local' : 'Navegador'}</small><span className="voice-radio">{selectedVoice?.voiceURI === voice.voiceURI && <span/>}</span></button>;
+function AuthScreen({ setupAvailable, setupRequired, onAuthenticated, initialError }) {
+  const [isSetup, setIsSetup] = useState(setupAvailable);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [setupToken, setSetupToken] = useState('');
+  const [error, setError] = useState(initialError || '');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async event => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(isSetup ? '/api/auth/setup' : '/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, ...(isSetup ? { setupToken } : {}) }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      onAuthenticated(data.user);
+    } catch (e) {
+      setError(e.message || 'No se pudo validar la cuenta. Inténtalo de nuevo.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="auth-page">
+    <section className="auth-card" aria-labelledby="auth-title">
+      <a className="brand auth-brand" href="/" aria-label="Kivoz"><span className="brand-mark">k<span/></span>kivoz<span className="brand-dot">.</span></a>
+      <span className="auth-kicker"><ShieldCheck size={14}/> TU ESTUDIO, BAJO TU CONTROL</span>
+      <h1 id="auth-title">{isSetup ? 'Crea la cuenta administradora' : 'Bienvenido de nuevo'}</h1>
+      <p>{isSetup ? 'El primer acceso debe autorizarse con el token configurado en el servidor.' : setupRequired ? 'La aplicación aún no tiene una cuenta. El propietario debe habilitar el alta inicial en el servidor.' : 'Inicia sesión para acceder a tu espacio y a tus preferencias.'}</p>
+      {setupRequired && !setupAvailable && <div className="info-box" role="status"><ShieldCheck size={18}/><p>Configura KIVOZ_ADMIN_SETUP_TOKEN con un secreto aleatorio de al menos 32 caracteres en el entorno de Netlify y vuelve a cargar esta página. No existe una contraseña predeterminada.</p></div>}
+      {error && <div className="error" role="alert"><CircleHelp size={17}/><span>{error}</span></div>}
+      {(!setupRequired || setupAvailable) && <form onSubmit={submit} className="auth-form">
+        {isSetup && <div className="field"><label htmlFor="setup-token">Token de alta inicial</label><input id="setup-token" required autoComplete="off" type="password" value={setupToken} onChange={event => setSetupToken(event.target.value)}/></div>}
+        <div className="field"><label htmlFor="auth-username">Nombre de usuario</label><input id="auth-username" required minLength={3} maxLength={32} autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} placeholder="tu_usuario"/></div>
+        <div className="field"><label htmlFor="auth-password">Contraseña</label><input id="auth-password" required minLength={isSetup ? 12 : 1} maxLength={128} autoComplete={isSetup ? 'new-password' : 'current-password'} type="password" value={password} onChange={event => setPassword(event.target.value)} placeholder={isSetup ? 'Al menos 12 caracteres' : 'Tu contraseña'}/></div>
+        <button className="button primary auth-submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17}/> : isSetup ? <UserPlus size={17}/> : <ShieldCheck size={17}/>} {busy ? 'Comprobando…' : isSetup ? 'Crear administrador' : 'Iniciar sesión'}</button>
+      </form>}
+      {setupAvailable && <button className="auth-switch" onClick={() => { setIsSetup(!isSetup); setError(''); }}>{isSetup ? '¿Ya tienes una cuenta? Inicia sesión' : 'Configurar la primera cuenta administradora'}</button>}
+      <div className="auth-foot"><ShieldCheck size={14}/> Sesiones seguras. Las credenciales no se guardan en este dispositivo.</div>
+    </section>
+  </div>;
+}
+
 function App() {
+  const [auth, setAuth] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState('');
+
+  useEffect(() => {
+    fetch('/api/auth/status')
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error);
+        setAuth(data);
+      })
+      .catch(error => {
+        setAuth({ user: null, setupAvailable: false });
+        setAuthError(error.message || 'No se pudo comprobar la sesión.');
+      })
+      .finally(() => setAuthLoading(false));
+  }, []);
+
+  if (authLoading) return <div className="auth-page"><div className="auth-loading"><LoaderCircle className="spin" size={25}/> Preparando tu espacio…</div></div>;
+  if (!auth?.user) return <AuthScreen setupAvailable={auth?.setupAvailable} setupRequired={auth?.setupRequired} initialError={authError} onAuthenticated={user => setAuth({ user, setupAvailable: false, setupRequired: false })}/>;
+  return <Studio key={auth.user.id} user={auth.user} onLogout={() => setAuth({ user: null, setupAvailable: false })}/>;
+}
+
+function Studio({ user, onLogout }) {
   const [page, setPage] = useState('Panel general');
   const [settings, setSettings] = useState(defaults);
   const currentSettings = useRef(settings); currentSettings.current = settings;
+  const [theme, setTheme] = useState('dark');
+  const currentTheme = useRef(theme); currentTheme.current = theme;
   const [voices, setVoices] = useState([]);
   const [status, setStatus] = useState('offline');
   const [connectedChannel, setConnectedChannel] = useState('');
@@ -34,6 +108,14 @@ function App() {
   const [history, setHistory] = useState([]);
   const [readCount, setReadCount] = useState(0);
   const [filtered, setFiltered] = useState(0);
+  const [managedUsers, setManagedUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newOwnPassword, setNewOwnPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
   const [testText, setTestText] = useState('¡Hola, chat! ¿Todo listo para el directo?');
   const socket = useRef(null);
   const attempt = useRef(0);
@@ -45,6 +127,7 @@ function App() {
   const utteranceRef = useRef(null);
   const changed = useRef(false);
   const patch = (key, value) => { changed.current = true; setSettings(s => ({ ...s, [key]: value })); setDirty(true); };
+  const changeTheme = value => { currentTheme.current = value; setTheme(value); setDirty(true); };
   const notice = text => setToast(text);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4500); return () => clearTimeout(t); }, [toast]);
   useEffect(() => {
@@ -64,13 +147,31 @@ function App() {
     return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = overflow; previous?.focus(); };
   }, [voiceModal, help]);
   useEffect(() => {
-    fetch('/api/settings').then(async r => { const data = await r.json(); if (!r.ok) throw Error(data.error); if (data.settings && !changed.current) setSettings({ ...defaults, ...data.settings }); }).catch(e => setError(e.message || 'No se pudieron cargar los ajustes.')).finally(() => setLoaded(true));
+    fetch('/api/settings').then(async r => { const data = await r.json(); if (!r.ok) throw Error(data.error); if (data.settings && !changed.current) setSettings({ ...defaults, ...data.settings }); if (data.theme === 'light' || data.theme === 'dark') setTheme(data.theme); }).catch(e => setError(e.message || 'No se pudieron cargar los ajustes.')).finally(() => setLoaded(true));
     if ('speechSynthesis' in window) {
       const load = () => setVoices(window.speechSynthesis.getVoices()); load();
       window.speechSynthesis.addEventListener('voiceschanged', load);
       return () => { window.speechSynthesis.removeEventListener('voiceschanged', load); window.speechSynthesis.cancel(); socket.current?.disconnect(); clearTimeout(connectionTimer.current); channelRequest.current?.abort(); attempt.current++; };
     }
   }, []);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0c100e' : '#f2f5ef');
+  }, [theme]);
+  useEffect(() => {
+    if (page !== 'Configuración' || user.role !== 'admin') return;
+    let active = true;
+    setUsersLoading(true);
+    fetch('/api/admin/users')
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error);
+        if (active) setManagedUsers(data.users);
+      })
+      .catch(error => { if (active) setError(error.message || 'No se pudo cargar la lista de usuarios.'); })
+      .finally(() => { if (active) setUsersLoading(false); });
+    return () => { active = false; };
+  }, [page, user.role]);
   const updateQueue = () => setQueue([...queueRef.current]);
   const pump = () => {
     if (speakingRef.current || pausedRef.current || !queueRef.current.length) return;
@@ -178,7 +279,76 @@ function App() {
   };
   const save = async () => {
     setSaving(true); setError('');
-    try { const r = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }); const data = await r.json(); if (!r.ok) throw Error(data.error); if (currentSettings.current === settings) setDirty(false); notice('Tu configuración se ha guardado.'); } catch (e) { setError(e.message || 'No se pudieron guardar los ajustes.'); } finally { setSaving(false); }
+    try { const r = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...settings, theme }) }); const data = await r.json(); if (!r.ok) throw Error(data.error); if (currentSettings.current === settings && currentTheme.current === theme) setDirty(false); notice('Tu configuración se ha guardado.'); } catch (e) { setError(e.message || 'No se pudieron guardar los ajustes.'); } finally { setSaving(false); }
+  };
+  const createUser = async event => {
+    event.preventDefault();
+    setCreatingUser(true);
+    setError('');
+    try {
+      const response = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: newUsername, password: newPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      setManagedUsers(users => [data.user, ...users]);
+      setNewUsername('');
+      setNewPassword('');
+      notice(`La cuenta de ${data.user.username} está lista.`);
+    } catch (error) {
+      setError(error.message || 'No se pudo crear el usuario.');
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+  const changeOwnPassword = async event => {
+    event.preventDefault();
+    setChangingPassword(true);
+    setError('');
+    try {
+      const response = await fetch('/api/auth/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword: newOwnPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      setCurrentPassword('');
+      setNewOwnPassword('');
+      notice('Tu contraseña se actualizó y se cerraron las demás sesiones.');
+    } catch (error) {
+      setError(error.message || 'No se pudo actualizar la contraseña.');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+  const removeUser = async account => {
+    if (!window.confirm(`¿Eliminar la cuenta de ${account.username}? Se borrarán sus preferencias y sesiones.`)) return;
+    setError('');
+    try {
+      const response = await fetch(`/api/admin/users/${encodeURIComponent(account.id)}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      setManagedUsers(accounts => accounts.filter(item => item.id !== account.id));
+      notice(`Se eliminó la cuenta de ${account.username}.`);
+    } catch (error) {
+      setError(error.message || 'No se pudo eliminar el usuario.');
+    }
+  };
+  const logout = async () => {
+    setError('');
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      document.documentElement.dataset.theme = 'dark';
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#0c100e');
+      onLogout();
+    } catch (error) {
+      setError(error.message || 'No se pudo cerrar la sesión.');
+    }
   };
   const skip = () => {
     const old = speakingRef.current;
@@ -191,6 +361,32 @@ function App() {
   const preview = () => { if (!('speechSynthesis' in window)) return setError('Este navegador no admite síntesis de voz. Prueba con Chrome o Edge.'); if (!testText.trim()) return notice('Escribe un mensaje para probar la voz.'); if (pausedRef.current) togglePause(); if (!enqueue({ id: crypto.randomUUID(), user: 'Prueba de voz', text: testText.trim(), test: true, time: time() })) notice('La cola está llena. Libera un espacio para probar la voz.'); };
   const selectedVoice = voices.find(v => v.voiceURI === settings.voice) || voices.find(v => v.lang.startsWith('es'));
   const voiceName = selectedVoice?.name.replace(/Microsoft |Google /g, '') || 'Voz del dispositivo';
+  if (page === 'Configuración') return <div className="account-shell" data-theme={theme}>
+    <header className="account-header">
+      <a className="brand" href="/" aria-label="Kivoz, inicio"><span className="brand-mark">k<span/></span>kivoz<span className="brand-dot">.</span></a>
+      <div className="account-header-actions"><span className="account-identity"><strong>{user.username}</strong><small>{user.role === 'admin' ? 'Administrador' : 'Usuario'}</small></span><button className="button secondary" onClick={() => changeTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={theme === 'dark' ? 'Activar modo claro' : 'Activar modo oscuro'}>{theme === 'dark' ? <Sun size={16}/> : <Moon size={16}/>} {theme === 'dark' ? 'Modo claro' : 'Modo oscuro'}</button><button className="button secondary" onClick={logout}><LogOut size={16}/> Cerrar sesión</button></div>
+    </header>
+    <main className="account-main">
+      <button className="back-link" onClick={() => setPage('Panel general')}><ArrowRight size={15}/> Volver al estudio</button>
+      <div className="account-heading"><div><span className="eyebrow"><span/> TU CUENTA</span><h1>Tu espacio, <span>a tu manera.</span></h1><p>Las preferencias y el aspecto se guardan en tu cuenta para que te acompañen en cada sesión.</p></div><button className="button primary" disabled={saving || !loaded} onClick={save}>{saving ? <LoaderCircle className="spin" size={16}/> : <Save size={16}/>} {saving ? 'Guardando…' : 'Guardar cambios'}{dirty && <i className="unsaved-dot"/>}</button></div>
+      {error && <div className="error" role="alert"><CircleHelp size={17}/><span>{error}</span><button aria-label="Cerrar aviso" onClick={() => setError('')}><X size={16}/></button></div>}
+      <section className="card account-card"><div className="card-heading"><div className="section-title"><span className="section-icon"><Settings2 size={19}/></span><h2>Preferencias del estudio</h2></div></div><p className="muted">Personaliza el aspecto y los ajustes principales de tu lector.</p>
+        <div className="rule-grid"><div className="field"><label htmlFor="settings-command">Comando de lectura</label><input id="settings-command" maxLength={20} value={settings.command} onChange={event => patch('command', event.target.value.replace(/\s/g, ''))}/></div><div className="field"><label htmlFor="settings-voice">Voz seleccionada</label><select id="settings-voice" value={settings.voice} onChange={event => patch('voice', event.target.value)}><option value="">Voz en español predeterminada</option>{voices.map(voice => <option key={voice.voiceURI} value={voice.voiceURI}>{voice.name} · {voice.lang}</option>)}</select></div></div>
+        <Toggle settings={settings} patch={patch} label="Leer nombre de usuario" detail="Anuncia quién envía cada mensaje." prop="readName"/>
+        <div className="theme-option"><div><strong>Aspecto</strong><small>Elige el tema que se guardará en esta cuenta.</small></div><div className="theme-switch"><button className={theme === 'light' ? 'selected' : ''} onClick={() => changeTheme('light')}><Sun size={15}/> Claro</button><button className={theme === 'dark' ? 'selected' : ''} onClick={() => changeTheme('dark')}><Moon size={15}/> Oscuro</button></div></div>
+        <div className="info-box"><ShieldCheck size={20}/><p>Tu configuración y tu tema son privados de esta cuenta. La actividad, los contadores y la cola son temporales y se vacían al cerrar o recargar la página.</p></div>
+        <button className="button secondary" onClick={() => { changed.current = true; setSettings(defaults); changeTheme('dark'); setDirty(true); notice('Preferencias restablecidas. Guarda los cambios para conservarlas.'); }}>Restablecer preferencias</button>
+        <div className="password-section"><div className="card-heading"><div className="section-title"><span className="section-icon"><ShieldCheck size={19}/></span><h2>Cambiar contraseña</h2></div></div><p className="muted">Al actualizarla se cerrarán las demás sesiones de esta cuenta.</p>
+          <form className="password-form" onSubmit={changeOwnPassword}><div className="field"><label htmlFor="current-password">Contraseña actual</label><input id="current-password" type="password" required autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)}/></div><div className="field"><label htmlFor="new-own-password">Nueva contraseña</label><input id="new-own-password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={newOwnPassword} onChange={event => setNewOwnPassword(event.target.value)} placeholder="Al menos 12 caracteres"/></div><button className="button secondary" disabled={changingPassword}>{changingPassword ? <LoaderCircle className="spin" size={16}/> : <ShieldCheck size={16}/>} Actualizar contraseña</button></form>
+        </div>
+      </section>
+      {user.role === 'admin' && <section className="card account-card admin-card"><div className="card-heading"><div className="section-title"><span className="section-icon"><Users size={19}/></span><h2>Administración de usuarios</h2></div><span className="tag">SOLO ADMINISTRACIÓN</span></div><p className="muted">Crea cuentas de usuario y elimina el acceso cuando sea necesario. Las cuentas nuevas no tienen permisos de administración.</p>
+        <form className="create-user-form" onSubmit={createUser}><div className="field"><label htmlFor="new-username">Nombre de usuario</label><input id="new-username" required minLength={3} maxLength={32} pattern="[a-zA-Z0-9._-]{3,32}" autoComplete="off" value={newUsername} onChange={event => setNewUsername(event.target.value)} placeholder="3–32 letras, números, punto, guion"/></div><div className="field"><label htmlFor="new-password">Contraseña inicial</label><input id="new-password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="Al menos 12 caracteres"/></div><button className="button primary" disabled={creatingUser}>{creatingUser ? <LoaderCircle className="spin" size={16}/> : <UserPlus size={16}/>} Crear usuario</button></form>
+        <div className="user-list-heading"><strong>Cuentas registradas</strong><span>{managedUsers.length}</span></div>{usersLoading ? <div className="user-loading"><LoaderCircle className="spin" size={17}/> Cargando usuarios…</div> : <div className="managed-users">{managedUsers.map(account => <div className="managed-user" key={account.id}><span className="user-avatar">{account.username.slice(0, 2).toUpperCase()}</span><div><strong>{account.username}</strong><small>{account.role === 'admin' ? 'Administrador' : 'Usuario'} · Desde {new Date(account.createdAt).toLocaleDateString('es')}</small></div>{account.role !== 'admin' && <button className="icon-button danger-action" aria-label={`Eliminar a ${account.username}`} onClick={() => removeUser(account)}><Trash2 size={17}/></button>}</div>)}{!managedUsers.length && !usersLoading && <p className="muted">Todavía no hay usuarios registrados.</p>}</div>}
+      </section>}
+    </main>
+    {toast && <div className="toast" role="status"><CheckCheck size={18}/>{toast}<button onClick={() => setToast('')} aria-label="Cerrar notificación"><X size={15}/></button></div>}
+  </div>;
   const spanish = voices.filter(v => v.lang.startsWith('es'));
   const featured = [selectedVoice, ...spanish, ...voices].filter((v, i, a) => v && a.findIndex(x => x?.voiceURI === v.voiceURI) === i).slice(0, 3);
   const Rules = () => <><div className="rule-grid"><div className="field"><label htmlFor="audience">Quién puede usar el comando</label><select id="audience" value={settings.audience} onChange={e => patch('audience', e.target.value)}><option value="all">Todos los espectadores</option><option value="subscribers">Suscriptores y moderadores</option><option value="moderators">Solo moderadores y broadcaster</option></select></div><div className="field"><label htmlFor="cooldown">Espera por usuario</label><div className="unit-input"><input id="cooldown" type="number" min="0" max="60" value={settings.cooldown} onChange={e => patch('cooldown', +e.target.value)}/><span>segundos</span></div></div><div className="field"><label htmlFor="maxLength">Longitud máxima</label><div className="unit-input"><input id="maxLength" type="number" min="20" max="500" value={settings.maxLength} onChange={e => patch('maxLength', +e.target.value)}/><span>caracteres</span></div></div><div className="field"><label htmlFor="blocked">Palabras bloqueadas</label><input id="blocked" placeholder="Separa las palabras con comas" value={settings.blocked} onChange={e => patch('blocked', e.target.value)}/></div></div><Toggle settings={settings} patch={patch} label="Omitir mensajes con enlaces" detail="Evita que se lean URLs durante el directo." prop="skipLinks"/><Toggle settings={settings} patch={patch} label="Omitir emotes de Kick" detail="Lee solo el texto, sin los códigos de los emotes." prop="skipEmotes"/></>;
