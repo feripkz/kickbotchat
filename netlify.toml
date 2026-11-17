@@ -3,5 +3,6 @@ command = "npm run build"
 publish = "dist"
 [build.environment]
 NODE_VERSION = "24"
+ONNXRUNTIME_NODE_INSTALL_CUDA = "skip"
 [server]
 path = "/api/*"
