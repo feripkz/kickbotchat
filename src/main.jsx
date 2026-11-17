@@ -1,15 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Pusher from 'pusher-js';
-import { AudioLines, LayoutDashboard, Mic2, SlidersHorizontal, ListFilter, Radio, ArrowUpRight, ArrowRight, ChevronDown, ChevronRight, Check, CircleHelp, Play, Pause, SkipForward, Trash2, X, MessageSquare, Link2, ShieldCheck, Save, Settings2, Headphones, CheckCheck, LoaderCircle, Moon, Sun, LogOut, Users, UserPlus } from 'lucide-react';
+import { AudioLines, LayoutDashboard, Mic2, SlidersHorizontal, ListFilter, Radio, ArrowUpRight, ArrowRight, ChevronDown, ChevronRight, Check, CircleHelp, Play, Pause, SkipForward, Trash2, X, MessageSquare, Link2, ShieldCheck, Save, Settings2, Headphones, CheckCheck, LoaderCircle, Moon, Sun, LogOut, Users, UserPlus, Crown, Plus } from 'lucide-react';
+import { createPiperVoiceProvider, isPiperVoice } from './piper-voices.js';
 import './styles.css';
 
-const defaults = { channel: '', command: '!aa', voice: '', rate: 1, pitch: 1, volume: .8, readName: true, skipLinks: true, skipEmotes: true, cooldown: 3, maxLength: 200, blocked: '', audience: 'all' };
+const defaults = { channel: '', tiktokChannel: '', command: '!aa', voice: '', voiceRules: [], rate: 1, pitch: 1, volume: .8, readName: true, skipLinks: true, skipEmotes: true, cooldown: 3, maxLength: 200, blocked: '', audience: 'all' };
 const nav = [{ name: 'Panel general', icon: LayoutDashboard }, { name: 'Voces', icon: Mic2 }, { name: 'Reglas de lectura', icon: ListFilter }, { name: 'Actividad', icon: AudioLines }];
 const time = () => new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
 const Range = ({ settings, patch, label, prop, min, max, step, unit = '×', display }) => <div className="range-field"><div><label htmlFor={prop}>{label}</label><span>{display || `${Number(settings[prop]).toFixed(1)}${unit}`}</span></div><input id={prop} type="range" min={min} max={max} step={step} value={settings[prop]} style={{ '--fill': `${(settings[prop] - min) / (max - min) * 100}%` }} onChange={e => patch(prop, +e.target.value)}/></div>;
 const Toggle = ({ settings, patch, label, detail, prop }) => <label className="toggle-row"><span><strong>{label}</strong>{detail && <small>{detail}</small>}</span><input type="checkbox" checked={settings[prop]} onChange={e => patch(prop, e.target.checked)}/><i aria-hidden="true"/></label>;
 const VoiceCard = ({ selectedVoice, patch, voice, index }) => <button className={`voice-choice ${selectedVoice?.voiceURI === voice.voiceURI ? 'selected' : ''}`} aria-pressed={selectedVoice?.voiceURI === voice.voiceURI} onClick={() => patch('voice', voice.voiceURI)}><div className={`voice-avatar avatar-${index % 3}`}><AudioLines size={23}/></div><strong>{voice.name.replace(/Microsoft |Google /g, '').split(' - ')[0]}</strong><small>{voice.lang} · {voice.localService ? 'Local' : 'Navegador'}</small><span className="voice-radio">{selectedVoice?.voiceURI === voice.voiceURI && <span/>}</span></button>;
+const isValidTiktokUser = value => /^[a-zA-Z0-9._]{2,24}$/.test(value);
+const tiktokServiceUrl = import.meta.env.VITE_TIKTOK_SERVICE_URL || '';
+const resolveVoiceRule = (rules, user, platform, traits) => {
+  const scoped = (rules || []).filter(rule => rule.platform === 'all' || rule.platform === platform);
+  const match = type => [...scoped].reverse().find(rule => rule.type === type && (
+    type === 'username' ? rule.value.toLocaleLowerCase() === user.toLocaleLowerCase() :
+    type === 'role' ? traits.roles.includes(rule.value) :
+    type === 'subscriber' ? traits.isSubscriber :
+    type === 'donor' ? traits.isDonor : false
+  ));
+  return match('username') || match('donor') || match('subscriber') || match('role') || null;
+};
 function AuthScreen({ setupAvailable, setupRequired, onAuthenticated, initialError }) {
   const [isSetup, setIsSetup] = useState(setupAvailable);
   const [username, setUsername] = useState('');
@@ -84,13 +97,16 @@ function App() {
 
 function Studio({ user, onLogout }) {
   const [page, setPage] = useState('Panel general');
+  const [activePlatform, setActivePlatform] = useState('kick');
   const [settings, setSettings] = useState(defaults);
   const currentSettings = useRef(settings); currentSettings.current = settings;
   const [theme, setTheme] = useState('dark');
   const currentTheme = useRef(theme); currentTheme.current = theme;
-  const [voices, setVoices] = useState([]);
-  const [status, setStatus] = useState('offline');
-  const [connectedChannel, setConnectedChannel] = useState('');
+  const [deviceVoices, setVoices] = useState([]);
+  const [uploadedVoices, setUploadedVoices] = useState([]);
+  const [connectionStates, setConnectionStates] = useState({ kick: 'offline', tiktok: 'offline' });
+  const [connectedChannels, setConnectedChannels] = useState({ kick: '', tiktok: '' });
+  const status = connectionStates[activePlatform];
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
@@ -116,14 +132,38 @@ function Studio({ user, onLogout }) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newOwnPassword, setNewOwnPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
+  const [piperVoiceName, setPiperVoiceName] = useState('');
+  const [voiceModelFile, setVoiceModelFile] = useState(null);
+  const [voiceConfigFile, setVoiceConfigFile] = useState(null);
+  const [voiceUploading, setVoiceUploading] = useState(false);
+  const [voiceUploadProgress, setVoiceUploadProgress] = useState(0);
+  const [voiceDeleting, setVoiceDeleting] = useState('');
+  const piperModelInputRef = useRef(null);
+  const piperConfigInputRef = useRef(null);
   const [testText, setTestText] = useState('¡Hola, chat! ¿Todo listo para el directo?');
+  const [ruleType, setRuleType] = useState('username');
+  const [ruleValue, setRuleValue] = useState('');
+  const [ruleVoice, setRuleVoice] = useState('');
+  const [rulePlatform, setRulePlatform] = useState(user.role === 'admin' ? 'all' : 'kick');
   const socket = useRef(null);
+  const tiktokSocket = useRef(null);
   const attempt = useRef(0);
+  const tiktokAttempt = useRef(0);
   const connectionTimer = useRef(null);
+  const tiktokTimer = useRef(null);
+  const tiktokAuthTimer = useRef(null);
+  const piperEngineRef = useRef(null);
+  const piperVoicesRef = useRef(uploadedVoices); piperVoicesRef.current = uploadedVoices;
+  const piperGenerationRef = useRef(0);
+  const piperAudioRef = useRef(null);
+  const piperPlaybackRef = useRef(null);
+  const piperAudioUrlRef = useRef(null);
   const channelRequest = useRef(null);
   const lastMessage = useRef(new Map());
   const seen = useRef(new Set());
-  const voiceRef = useRef([]); voiceRef.current = voices;
+  const donors = useRef(new Set());
+  const availableVoices = [...deviceVoices, ...uploadedVoices];
+  const voiceRef = useRef([]); voiceRef.current = availableVoices;
   const utteranceRef = useRef(null);
   const changed = useRef(false);
   const patch = (key, value) => { changed.current = true; setSettings(s => ({ ...s, [key]: value })); setDirty(true); };
@@ -148,11 +188,38 @@ function Studio({ user, onLogout }) {
   }, [voiceModal, help]);
   useEffect(() => {
     fetch('/api/settings').then(async r => { const data = await r.json(); if (!r.ok) throw Error(data.error); if (data.settings && !changed.current) setSettings({ ...defaults, ...data.settings }); if (data.theme === 'light' || data.theme === 'dark') setTheme(data.theme); }).catch(e => setError(e.message || 'No se pudieron cargar los ajustes.')).finally(() => setLoaded(true));
+    fetch('/api/voices').then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      setUploadedVoices(data.voices || []);
+    }).catch(error => setError(error.message || 'No se pudieron cargar las voces compartidas.'));
+    let loadVoices;
     if ('speechSynthesis' in window) {
-      const load = () => setVoices(window.speechSynthesis.getVoices()); load();
-      window.speechSynthesis.addEventListener('voiceschanged', load);
-      return () => { window.speechSynthesis.removeEventListener('voiceschanged', load); window.speechSynthesis.cancel(); socket.current?.disconnect(); clearTimeout(connectionTimer.current); channelRequest.current?.abort(); attempt.current++; };
+      loadVoices = () => setVoices(window.speechSynthesis.getVoices());
+      loadVoices();
+      window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
     }
+    return () => {
+      if (loadVoices) window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+      window.speechSynthesis?.cancel();
+      piperGenerationRef.current++;
+      piperPlaybackRef.current?.pause();
+      if (piperAudioRef.current) {
+        piperAudioRef.current.onended = null;
+        piperAudioRef.current.onerror = null;
+        piperAudioRef.current.src = '';
+      }
+      if (piperAudioUrlRef.current) URL.revokeObjectURL(piperAudioUrlRef.current);
+      piperEngineRef.current?.destroy();
+      socket.current?.disconnect();
+      tiktokSocket.current?.close();
+      clearTimeout(connectionTimer.current);
+      clearTimeout(tiktokTimer.current);
+      clearInterval(tiktokAuthTimer.current);
+      channelRequest.current?.abort();
+      attempt.current++;
+      tiktokAttempt.current++;
+    };
   }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -173,68 +240,166 @@ function Studio({ user, onLogout }) {
     return () => { active = false; };
   }, [page, user.role]);
   const updateQueue = () => setQueue([...queueRef.current]);
+  const getPiperEngine = async () => {
+    if (!piperEngineRef.current) {
+      const { PiperWebWorkerEngine } = await import('piper-tts-web');
+      const provider = createPiperVoiceProvider(() => piperVoicesRef.current);
+      piperEngineRef.current = new PiperWebWorkerEngine({ voiceProvider: provider });
+    }
+    return piperEngineRef.current;
+  };
+  const primePiperAudio = () => {
+    if (piperPlaybackRef.current) return;
+    const audio = piperAudioRef.current || new Audio();
+    piperAudioRef.current = audio;
+    const buffer = new ArrayBuffer(46);
+    const view = new DataView(buffer);
+    const write = (offset, text) => [...text].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+    write(0, 'RIFF'); view.setUint32(4, 38, true); write(8, 'WAVE'); write(12, 'fmt ');
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 22050, true); view.setUint32(28, 44100, true); view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true); write(36, 'data'); view.setUint32(40, 2, true); view.setInt16(44, 0, true);
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+    audio.volume = 0;
+    audio.src = url;
+    const unlock = audio.play();
+    if (unlock) unlock.then(() => {
+      audio.pause(); audio.currentTime = 0; audio.volume = currentSettings.current.volume;
+      URL.revokeObjectURL(url);
+    }).catch(() => {
+      audio.volume = currentSettings.current.volume;
+      setError('El navegador bloqueó el audio de las voces Piper. Permite la reproducción de audio y vuelve a conectar.');
+      URL.revokeObjectURL(url);
+    });
+  };
+  const finishItem = (item, success, source = {}) => {
+    if (source.utterance && utteranceRef.current !== source.utterance) return;
+    if (source.audio && piperPlaybackRef.current !== source.audio) return;
+    if (speakingRef.current?.id !== item.id) return;
+    speakingRef.current = null; setSpeaking(null);
+    if (source.utterance) utteranceRef.current = null;
+    if (source.audio) {
+      source.audio.onended = null;
+      source.audio.onerror = null;
+      piperPlaybackRef.current = null;
+      if (piperAudioUrlRef.current) URL.revokeObjectURL(piperAudioUrlRef.current);
+      piperAudioUrlRef.current = null;
+    }
+    if (success && !item.test) setReadCount(n => n + 1);
+    setHistory(h => h.map(m => m.id === item.id ? { ...m, state: success ? 'Leído' : 'Error de audio' } : m));
+    if (!success) notice('No se pudo reproducir el audio. Comprueba la voz y los permisos de sonido.');
+    pump();
+  };
+  const speakPiper = async (item, settings, voice) => {
+    const generation = ++piperGenerationRef.current;
+    try {
+      const engine = await getPiperEngine();
+      const text = (settings.readName && !item.test ? `${item.user} dice: ` : '') + item.text;
+      const result = await engine.generate(text, voice, 0);
+      if (generation !== piperGenerationRef.current || speakingRef.current?.id !== item.id) return;
+      const audio = piperAudioRef.current || new Audio();
+      piperAudioRef.current = audio;
+      piperAudioUrlRef.current = URL.createObjectURL(result.file);
+      piperPlaybackRef.current = audio;
+      audio.src = piperAudioUrlRef.current;
+      audio.playbackRate = settings.rate;
+      audio.volume = settings.volume;
+      audio.onended = () => finishItem(item, true, { audio });
+      audio.onerror = () => finishItem(item, false, { audio });
+      if (!pausedRef.current) await audio.play();
+    } catch (error) {
+      const failedEngine = piperEngineRef.current;
+      piperEngineRef.current = null;
+      failedEngine?.destroy();
+      if (generation !== piperGenerationRef.current || speakingRef.current?.id !== item.id) return;
+      setError(error.message || 'No se pudo generar audio con esta voz Piper.');
+      if (piperPlaybackRef.current) finishItem(item, false, { audio: piperPlaybackRef.current });
+      else finishItem(item, false);
+    }
+  };
   const pump = () => {
     if (speakingRef.current || pausedRef.current || !queueRef.current.length) return;
-    if (!('speechSynthesis' in window)) { setError('Este navegador no admite síntesis de voz. Prueba con Chrome o Edge.'); return; }
     const item = queueRef.current.shift(); updateQueue();
     speakingRef.current = item; setSpeaking(item);
     const s = currentSettings.current;
+    const fallbackVoice = 'speechSynthesis' in window
+      ? voiceRef.current.find(v => v.lang.startsWith('es'))?.voiceURI
+      : piperVoicesRef.current[0]?.voiceURI;
+    const voice = item.voice || s.voice || fallbackVoice;
+    if (isPiperVoice(voice)) {
+      speakPiper(item, s, voice);
+      return;
+    }
+    if (!('speechSynthesis' in window)) {
+      setError('Este navegador no admite síntesis de voz y el mensaje no tiene una voz Piper asignada.');
+      finishItem(item, false);
+      return;
+    }
     const utterance = new SpeechSynthesisUtterance((s.readName && !item.test ? `${item.user} dice: ` : '') + item.text);
-    utterance.voice = voiceRef.current.find(v => v.voiceURI === s.voice) || voiceRef.current.find(v => v.lang.startsWith('es')) || null;
+    utterance.voice = voiceRef.current.find(v => v.voiceURI === voice) || voiceRef.current.find(v => v.lang.startsWith('es')) || null;
     utterance.lang = utterance.voice?.lang || 'es-ES';
     utterance.rate = s.rate; utterance.pitch = s.pitch; utterance.volume = s.volume;
     utteranceRef.current = utterance;
-    const finish = success => {
-      if (utteranceRef.current !== utterance) return;
-      speakingRef.current = null; setSpeaking(null); utteranceRef.current = null;
-      if (success && !item.test) setReadCount(n => n + 1);
-      setHistory(h => h.map(m => m.id === item.id ? { ...m, state: success ? 'Leído' : 'Error de audio' } : m));
-      if (!success) notice('No se pudo reproducir el audio. Comprueba la voz y los permisos de sonido.');
-      pump();
-    };
-    utterance.onend = () => finish(true);
-    utterance.onerror = () => finish(false);
+    utterance.onend = () => finishItem(item, true, { utterance });
+    utterance.onerror = () => finishItem(item, false, { utterance });
     window.speechSynthesis.speak(utterance);
   };
   const enqueue = item => {
     if (queueRef.current.length >= 50) return false;
     queueRef.current.push(item); updateQueue(); pump(); return true;
   };
-  const receive = payload => {
+  const receive = (payload, platform = 'kick', metadata = {}) => {
     const s = currentSettings.current;
     if (typeof payload?.content !== 'string') return;
-    const id = String(payload.id || crypto.randomUUID());
+    const id = `${platform}:${String(payload.id || crypto.randomUUID())}`;
     if (seen.current.has(id)) return;
     seen.current.add(id); if (seen.current.size > 1000) seen.current.delete(seen.current.values().next().value);
     const content = payload.content;
-    const user = payload.sender?.username || 'Espectador';
+    const user = metadata.username || payload.sender?.username || 'Espectador';
     const matched = Boolean(s.command) && content.startsWith(s.command) && (content.length === s.command.length || /\s/.test(content[s.command.length]));
     let text = matched ? content.slice(s.command.length).trim() : '';
-    const badges = payload.sender?.identity?.badges || [];
-    const moderator = badges.some(b => ['moderator', 'broadcaster'].includes(b.type));
-    const allowed = s.audience === 'all' || moderator || (s.audience === 'subscribers' && badges.some(b => b.type === 'subscriber'));
+    const badges = Array.isArray(payload.sender?.identity?.badges) ? payload.sender.identity.badges : [];
+    const badgeTypes = badges.map(b => String(b.type || '').toLocaleLowerCase());
+    const roles = [...new Set([...(metadata.roles || []), ...badgeTypes])];
+    const moderator = metadata.isModerator || roles.some(role => ['moderator', 'broadcaster', 'admin'].includes(role));
+    const isSubscriber = metadata.isSubscriber || roles.includes('subscriber');
+    const isDonor = metadata.isDonor || donors.current.has(`${platform}:${metadata.channel || ''}:${user.toLocaleLowerCase()}`) || roles.some(role => ['donor', 'donator', 'gifter'].includes(role));
+    const allowed = s.audience === 'all' || moderator || (s.audience === 'subscribers' && isSubscriber);
     const blocked = s.blocked.split(',').map(w => w.trim().toLocaleLowerCase()).filter(Boolean);
     let reason = !matched ? 'Sin comando' : !text ? 'Mensaje vacío' : !allowed ? 'Rol no permitido' : text.length > s.maxLength ? 'Demasiado largo' : s.skipLinks && /https?:\/\/|www\./i.test(text) ? 'Enlace filtrado' : blocked.some(w => text.toLocaleLowerCase().includes(w)) ? 'Palabra bloqueada' : '';
     if (s.skipEmotes) text = text.replace(/\[emote:[^\]]+\]/g, '').trim();
     if (!text && !reason) reason = 'Solo emotes';
-    if (!reason && Date.now() - (lastMessage.current.get(user) || 0) < s.cooldown * 1000) reason = 'Tiempo de espera';
-    const item = { id, user, text, content, time: time(), state: reason || 'En cola' };
+    const cooldownKey = `${platform}:${user.toLocaleLowerCase()}`;
+    if (!reason && Date.now() - (lastMessage.current.get(cooldownKey) || 0) < s.cooldown * 1000) reason = 'Tiempo de espera';
+    const traits = { roles, isSubscriber, isDonor };
+    const assignedVoice = resolveVoiceRule(s.voiceRules, user, platform, traits);
+    const item = { id, user, text, content, platform, voice: assignedVoice?.voice || s.voice, time: time(), state: reason || 'En cola' };
     setHistory(h => [item, ...h].slice(0, 150));
     if (reason) { setFiltered(n => n + 1); return; }
     if (!enqueue(item)) { setFiltered(n => n + 1); setHistory(h => h.map(m => m.id === id ? { ...m, state: 'Cola llena' } : m)); return; }
-    lastMessage.current.set(user, Date.now());
+    lastMessage.current.set(cooldownKey, Date.now());
     if (lastMessage.current.size > 2000) lastMessage.current.delete(lastMessage.current.keys().next().value);
   };
-  const connect = async () => {
-    if (status !== 'offline') { attempt.current++; clearTimeout(connectionTimer.current); channelRequest.current?.abort(); socket.current?.disconnect(); socket.current = null; setStatus('offline'); return; }
+  const setPlatformStatus = (platform, value) => setConnectionStates(states => ({ ...states, [platform]: value }));
+  const setConnectedChannel = (platform, value) => setConnectedChannels(channels => ({ ...channels, [platform]: value }));
+  const resetDonors = platform => {
+    for (const donor of donors.current) if (donor.startsWith(`${platform}:`)) donors.current.delete(donor);
+  };
+  const connectKick = async () => {
+    if (connectionStates.kick !== 'offline') { attempt.current++; clearTimeout(connectionTimer.current); channelRequest.current?.abort(); socket.current?.disconnect(); socket.current = null; setConnectedChannel('kick', ''); setPlatformStatus('kick', 'offline'); return; }
     setError('');
     let slug = settings.channel.trim();
     if (/^(https?:\/\/)?(www\.)?kick\.com\//i.test(slug)) slug = slug.replace(/^(https?:\/\/)?(www\.)?kick\.com\//i, '').split(/[/?#]/)[0];
     if (!/^[a-zA-Z0-9_-]{1,60}$/.test(slug)) { setError('Escribe el nombre de tu canal o su enlace de Kick.'); return; }
-    if (!('speechSynthesis' in window)) { setError('Usa un navegador compatible con síntesis de voz, como Chrome o Edge.'); return; }
-    patch('channel', slug); setStatus('connecting');
+    if (!('speechSynthesis' in window) && !uploadedVoices.length) { setError('Usa un navegador compatible con síntesis de voz o solicita al administrador una voz Piper.'); return; }
+    resetDonors('kick');
+    patch('channel', slug); setPlatformStatus('kick', 'connecting');
     // Prime browser audio from the connect gesture; subsequent chat messages use the same session.
-    const unlock = new SpeechSynthesisUtterance(''); window.speechSynthesis.speak(unlock);
+    if ('speechSynthesis' in window) {
+      const unlock = new SpeechSynthesisUtterance('');
+      window.speechSynthesis.speak(unlock);
+    }
+    if (uploadedVoices.length) primePiperAudio();
     const request = ++attempt.current;
     try {
       channelRequest.current = new AbortController();
@@ -251,7 +416,7 @@ function Studio({ user, onLogout }) {
         clearTimeout(connectionTimer.current);
         socket.current = null;
         client.disconnect();
-        setConnectedChannel(''); setStatus('offline'); setError(message);
+        setConnectedChannel('kick', ''); setPlatformStatus('kick', 'offline'); setError(message);
       };
       const waitForSubscription = () => {
         clearTimeout(connectionTimer.current);
@@ -264,19 +429,154 @@ function Studio({ user, onLogout }) {
       });
       socket.current = client;
       const channel = client.subscribe(`chatrooms.${data.chatroomId}.v2`);
-      channel.bind('App\\Events\\ChatMessageEvent', payload => { if (request === attempt.current) receive(payload); });
-      channel.bind('pusher:subscription_succeeded', () => { if (request === attempt.current) { clearTimeout(connectionTimer.current); connectionTimer.current = null; setError(''); setStatus('online'); setConnectedChannel(data.slug); notice(`Conectado al chat de ${data.slug}`); } });
+      channel.bind('App\\Events\\ChatMessageEvent', payload => { if (request === attempt.current) receive(payload, 'kick', { channel: data.slug }); });
+      channel.bind('pusher:subscription_succeeded', () => { if (request === attempt.current) { clearTimeout(connectionTimer.current); connectionTimer.current = null; setError(''); setPlatformStatus('kick', 'online'); setConnectedChannel('kick', data.slug); notice(`Conectado al chat de Kick: ${data.slug}`); } });
       channel.bind('pusher:subscription_error', () => fail('No se pudo suscribir al chat de Kick. Inténtalo de nuevo.'));
       client.connection.bind('state_change', ({ current }) => {
         if (request !== attempt.current || current === 'connected') return;
         if (['connecting', 'unavailable', 'disconnected'].includes(current)) {
-          setStatus('connecting');
+          setPlatformStatus('kick', 'connecting');
           if (!connectionTimer.current) waitForSubscription();
         }
         if (current === 'failed') fail('La conexión con el chat falló. Vuelve a conectar.');
       });
-    } catch (e) { if (request === attempt.current) { setStatus('offline'); setError(e.message || 'No se pudo conectar con Kick.'); } }
+    } catch (e) { if (request === attempt.current) { setPlatformStatus('kick', 'offline'); setError(e.message || 'No se pudo conectar con Kick.'); } }
   };
+  const connectTikTok = async () => {
+    if (user.role !== 'admin') {
+      setError('La conexión con TikTok está disponible solo para administradores.');
+      return;
+    }
+    if (connectionStates.tiktok !== 'offline') {
+      tiktokAttempt.current++;
+      clearTimeout(tiktokTimer.current);
+      clearInterval(tiktokAuthTimer.current);
+      tiktokSocket.current?.close(1000, 'Desconexión solicitada');
+      tiktokSocket.current = null;
+      setConnectedChannel('tiktok', '');
+      setPlatformStatus('tiktok', 'offline');
+      return;
+    }
+    setError('');
+    let channel = settings.tiktokChannel.trim();
+    channel = channel.replace(/^(https?:\/\/)?(www\.)?tiktok\.com\/@?/i, '').replace(/^@/, '').split(/[/?#]/)[0].toLowerCase();
+    if (!isValidTiktokUser(channel)) { setError('Escribe un usuario de TikTok válido o su enlace, sin espacios.'); return; }
+    if (!tiktokServiceUrl) { setError('Falta configurar VITE_TIKTOK_SERVICE_URL y desplegar el servicio de conexión TikTok.'); return; }
+    if (!('speechSynthesis' in window) && !uploadedVoices.length) { setError('Usa un navegador compatible con síntesis de voz o solicita al administrador una voz Piper.'); return; }
+    resetDonors('tiktok');
+    patch('tiktokChannel', channel);
+    setPlatformStatus('tiktok', 'connecting');
+    if ('speechSynthesis' in window) {
+      const unlock = new SpeechSynthesisUtterance('');
+      window.speechSynthesis.speak(unlock);
+    }
+    if (uploadedVoices.length) primePiperAudio();
+    const request = ++tiktokAttempt.current;
+    const tokenResponse = await fetch('/api/tiktok/connect-token', { method: 'POST' });
+    const tokenData = await tokenResponse.json();
+    if (request !== tiktokAttempt.current) return;
+    if (!tokenResponse.ok) throw Error(tokenData.error || 'No se pudo autorizar la conexión TikTok.');
+    const socketAttempt = new WebSocket(tiktokServiceUrl.replace(/^http/i, 'ws').replace(/\/+$/, '') + `/live?channel=${encodeURIComponent(channel)}&token=${encodeURIComponent(tokenData.token)}`);
+    tiktokSocket.current = socketAttempt;
+    tiktokAuthTimer.current = setInterval(async () => {
+      if (tiktokSocket.current !== socketAttempt || request !== tiktokAttempt.current || socketAttempt.readyState !== WebSocket.OPEN) return;
+      try {
+        const response = await fetch('/api/tiktok/connect-token', { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error || 'La sesión ya no autoriza TikTok.');
+        if (tiktokSocket.current === socketAttempt && request === tiktokAttempt.current && socketAttempt.readyState === WebSocket.OPEN) {
+          socketAttempt.send(JSON.stringify({ type: 'auth', token: data.token }));
+        }
+      } catch (error) {
+        if (tiktokSocket.current !== socketAttempt || request !== tiktokAttempt.current) return;
+        clearInterval(tiktokAuthTimer.current);
+        setError(error.message || 'No se pudo renovar la autorización de TikTok.');
+        socketAttempt.close(4001, 'Authorization renewal failed.');
+      }
+    }, 30_000);
+    tiktokTimer.current = setTimeout(() => {
+      if (tiktokSocket.current === socketAttempt && request === tiktokAttempt.current) {
+        clearInterval(tiktokAuthTimer.current);
+        socketAttempt.close();
+        tiktokSocket.current = null;
+        setPlatformStatus('tiktok', 'offline');
+        setError('TikTok no confirmó la conexión. Comprueba el servicio y que el canal esté en directo.');
+      }
+    }, 25000);
+    socketAttempt.onmessage = event => {
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+      if (tiktokSocket.current !== socketAttempt || request !== tiktokAttempt.current) return;
+      if (data.type === 'connected') {
+        clearTimeout(tiktokTimer.current);
+        setError('');
+        setPlatformStatus('tiktok', 'online');
+        setConnectedChannel('tiktok', data.channel || channel);
+        notice(`Conectado al chat de TikTok: ${data.channel || channel}`);
+      } else if (data.type === 'chat') {
+        receive({ id: data.id, content: data.content }, 'tiktok', {
+          username: data.username,
+          channel: data.channel || channel,
+          roles: data.roles || [],
+          isModerator: data.isModerator,
+          isSubscriber: data.isSubscriber,
+        });
+      } else if (data.type === 'gift' && data.username) {
+        donors.current.add(`tiktok:${data.channel || channel}:${data.username.toLocaleLowerCase()}`);
+        if (donors.current.size > 5000) donors.current.delete(donors.current.values().next().value);
+      } else if (data.type === 'error') {
+        tiktokAttempt.current++;
+        clearTimeout(tiktokTimer.current);
+        clearInterval(tiktokAuthTimer.current);
+        setPlatformStatus('tiktok', 'offline');
+        setConnectedChannel('tiktok', '');
+        setError(data.message || 'El servicio TikTok no pudo conectar con el LIVE.');
+        socketAttempt.close();
+        tiktokSocket.current = null;
+      }
+    };
+    socketAttempt.onerror = () => {
+      if (tiktokSocket.current !== socketAttempt || request !== tiktokAttempt.current) return;
+      clearTimeout(tiktokTimer.current);
+      clearInterval(tiktokAuthTimer.current);
+      setPlatformStatus('tiktok', 'offline');
+      setConnectedChannel('tiktok', '');
+      setError('No se pudo alcanzar el servicio TikTok. Revisa su URL, disponibilidad y configuración de origen.');
+      tiktokSocket.current = null;
+      socketAttempt.close();
+    };
+    socketAttempt.onclose = () => {
+      if (tiktokSocket.current !== socketAttempt || request !== tiktokAttempt.current) return;
+      clearTimeout(tiktokTimer.current);
+      clearInterval(tiktokAuthTimer.current);
+      tiktokSocket.current = null;
+      setConnectedChannel('tiktok', '');
+      setPlatformStatus('tiktok', 'offline');
+      setError('La conexión de TikTok se cerró. Revisa que el LIVE siga activo y vuelve a conectar.');
+    };
+  };
+  const connect = () => {
+    if (activePlatform === 'kick') return connectKick();
+    return connectTikTok().catch(error => {
+      setPlatformStatus('tiktok', 'offline');
+      setError(error.message || 'No se pudo iniciar la conexión TikTok.');
+    });
+  };
+  const addVoiceRule = event => {
+    event.preventDefault();
+    const value = ruleType === 'username' ? ruleValue.trim() : ruleType === 'role' ? ruleValue : '';
+    if (ruleType === 'username' && !/^[a-zA-Z0-9._-]{1,32}$/.test(value)) {
+      setError('Escribe un nombre de usuario válido para asignar la voz.');
+      return;
+    }
+    if (ruleType === 'role' && !['moderator', 'broadcaster'].includes(value)) return;
+    if (!ruleVoice) { setError('Selecciona una voz para la regla.'); return; }
+    const rule = { id: crypto.randomUUID(), type: ruleType, value, voice: ruleVoice, platform: rulePlatform };
+    patch('voiceRules', [...(settings.voiceRules || []), rule].slice(-30));
+    setRuleValue('');
+    notice('La regla de voz se añadió. Guarda los cambios para conservarla.');
+  };
+  const removeVoiceRule = id => patch('voiceRules', (settings.voiceRules || []).filter(rule => rule.id !== id));
   const save = async () => {
     setSaving(true); setError('');
     try { const r = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...settings, theme }) }); const data = await r.json(); if (!r.ok) throw Error(data.error); if (currentSettings.current === settings && currentTheme.current === theme) setDirty(false); notice('Tu configuración se ha guardado.'); } catch (e) { setError(e.message || 'No se pudieron guardar los ajustes.'); } finally { setSaving(false); }
@@ -301,6 +601,107 @@ function Studio({ user, onLogout }) {
       setError(error.message || 'No se pudo crear el usuario.');
     } finally {
       setCreatingUser(false);
+    }
+  };
+  const uploadPiperVoice = async event => {
+    event.preventDefault();
+    if (!voiceModelFile || !voiceConfigFile || !piperVoiceName.trim()) {
+      setError('Escribe un nombre y selecciona el modelo `.onnx` y su configuración `.onnx.json`.');
+      return;
+    }
+    if (!voiceModelFile.name.toLowerCase().endsWith('.onnx') || !voiceConfigFile.name.toLowerCase().endsWith('.onnx.json')) {
+      setError('Selecciona el modelo `.onnx` y su archivo correspondiente `.onnx.json`.');
+      return;
+    }
+    if (voiceModelFile.size > 120 * 1024 * 1024 || voiceConfigFile.size > 2 * 1024 * 1024) {
+      setError('El modelo puede ocupar hasta 120 MB y la configuración hasta 2 MB.');
+      return;
+    }
+    let config;
+    try {
+      config = JSON.parse(await voiceConfigFile.text());
+    } catch {
+      setError('El archivo `.onnx.json` no contiene JSON válido.');
+      return;
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)
+      || !Number.isInteger(config.audio?.sample_rate) || !config.phoneme_id_map
+      || !config.inference || !Number.isInteger(config.num_speakers)
+      || typeof config.language?.code !== 'string') {
+      setError('Ese archivo no parece una configuración de voz Piper compatible.');
+      return;
+    }
+    setVoiceUploading(true);
+    setVoiceUploadProgress(0);
+    setError('');
+    let voiceId = '';
+    try {
+      const startResponse = await fetch('/api/admin/voices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: piperVoiceName.trim(), modelSize: voiceModelFile.size }),
+      });
+      const startData = await startResponse.json();
+      if (!startResponse.ok) throw Error(startData.error);
+      voiceId = startData.id;
+      const configResponse = await fetch(`/api/admin/voices/${encodeURIComponent(voiceId)}/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: voiceConfigFile,
+      });
+      const configData = await configResponse.json();
+      if (!configResponse.ok) throw Error(configData.error);
+      const parts = startData.chunks;
+      for (let index = 0; index < parts; index++) {
+        const chunk = voiceModelFile.slice(index * startData.chunkSize, (index + 1) * startData.chunkSize);
+        const response = await fetch(`/api/admin/voices/${encodeURIComponent(voiceId)}/model/${index}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: chunk,
+        });
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error);
+        setVoiceUploadProgress(Math.round(((index + 1) / parts) * 90));
+      }
+      const completeResponse = await fetch(`/api/admin/voices/${encodeURIComponent(voiceId)}/complete`, { method: 'POST' });
+      const completeData = await completeResponse.json();
+      if (!completeResponse.ok) throw Error(completeData.error);
+      setUploadedVoices(current => [...current.filter(voice => voice.id !== voiceId), completeData.voice].sort((a, b) => a.name.localeCompare(b.name, 'es')));
+      setPiperVoiceName('');
+      setVoiceModelFile(null);
+      setVoiceConfigFile(null);
+      if (piperModelInputRef.current) piperModelInputRef.current.value = '';
+      if (piperConfigInputRef.current) piperConfigInputRef.current.value = '';
+      setVoiceUploadProgress(100);
+      notice(`La voz ${completeData.voice.name} ya está disponible para las cuentas.`);
+    } catch (error) {
+      setError(error.message || 'No se pudo subir la voz Piper.');
+      if (voiceId) {
+        try {
+          const cleanupResponse = await fetch(`/api/admin/voices/${encodeURIComponent(voiceId)}`, { method: 'DELETE' });
+          if (!cleanupResponse.ok) throw Error();
+        } catch {
+          setError(`${error.message || 'No se pudo subir la voz Piper.'} No se pudo limpiar la carga incompleta.`);
+        }
+      }
+    } finally {
+      setVoiceUploading(false);
+    }
+  };
+  const removePiperVoice = async voice => {
+    if (!window.confirm(`¿Eliminar la voz ${voice.name}? Se quitará para todas las cuentas y sus preferencias dejarán de encontrarla.`)) return;
+    setVoiceDeleting(voice.id);
+    setError('');
+    try {
+      const response = await fetch(`/api/admin/voices/${encodeURIComponent(voice.id)}`, { method: 'DELETE' });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      setUploadedVoices(current => current.filter(item => item.id !== voice.id));
+      notice(`Se eliminó la voz ${voice.name}.`);
+    } catch (error) {
+      setError(error.message || 'No se pudo eliminar la voz.');
+    } finally {
+      setVoiceDeleting('');
     }
   };
   const changeOwnPassword = async event => {
@@ -352,15 +753,57 @@ function Studio({ user, onLogout }) {
   };
   const skip = () => {
     const old = speakingRef.current;
+    piperGenerationRef.current++;
+    if (piperPlaybackRef.current) {
+      piperPlaybackRef.current.onended = null;
+      piperPlaybackRef.current.onerror = null;
+      piperPlaybackRef.current.pause();
+      piperPlaybackRef.current.src = '';
+      piperPlaybackRef.current = null;
+      if (piperAudioUrlRef.current) URL.revokeObjectURL(piperAudioUrlRef.current);
+      piperAudioUrlRef.current = null;
+    }
     utteranceRef.current = null; window.speechSynthesis?.cancel(); speakingRef.current = null; setSpeaking(null);
     if (old) setHistory(h => h.map(m => m.id === old.id ? { ...m, state: 'Omitido' } : m));
     pump();
   };
-  const togglePause = () => { pausedRef.current = !pausedRef.current; setPaused(pausedRef.current); if (pausedRef.current) window.speechSynthesis?.pause(); else { window.speechSynthesis?.resume(); pump(); } };
+  const togglePause = () => {
+    pausedRef.current = !pausedRef.current;
+    setPaused(pausedRef.current);
+    if (pausedRef.current) {
+      if (piperPlaybackRef.current) piperPlaybackRef.current.pause();
+      else window.speechSynthesis?.pause();
+    } else {
+      if (piperPlaybackRef.current) piperPlaybackRef.current.play().catch(() => setError('El navegador bloqueó la reanudación del audio Piper.'));
+      else window.speechSynthesis?.resume();
+      pump();
+    }
+  };
   const clear = () => { queueRef.current = []; updateQueue(); setHistory(h => h.map(m => m.state === 'En cola' && m.id !== speakingRef.current?.id ? { ...m, state: 'Eliminado' } : m)); notice('Cola de lectura vaciada.'); };
-  const preview = () => { if (!('speechSynthesis' in window)) return setError('Este navegador no admite síntesis de voz. Prueba con Chrome o Edge.'); if (!testText.trim()) return notice('Escribe un mensaje para probar la voz.'); if (pausedRef.current) togglePause(); if (!enqueue({ id: crypto.randomUUID(), user: 'Prueba de voz', text: testText.trim(), test: true, time: time() })) notice('La cola está llena. Libera un espacio para probar la voz.'); };
-  const selectedVoice = voices.find(v => v.voiceURI === settings.voice) || voices.find(v => v.lang.startsWith('es'));
+  const preview = () => {
+    if (!('speechSynthesis' in window) && !uploadedVoices.length) return setError('Este navegador no admite síntesis de voz y no hay voces Piper disponibles.');
+    if (!testText.trim()) return notice('Escribe un mensaje para probar la voz.');
+    if (isPiperVoice(settings.voice) || !('speechSynthesis' in window)) primePiperAudio();
+    if (pausedRef.current) togglePause();
+    if (!enqueue({ id: crypto.randomUUID(), user: 'Prueba de voz', text: testText.trim(), test: true, time: time() })) notice('La cola está llena. Libera un espacio para probar la voz.');
+  };
+  const voices = availableVoices;
+  const selectedVoice = availableVoices.find(v => v.voiceURI === settings.voice) || availableVoices.find(v => v.lang.startsWith('es'));
   const voiceName = selectedVoice?.name.replace(/Microsoft |Google /g, '') || 'Voz del dispositivo';
+  const channelField = activePlatform === 'kick' ? 'channel' : 'tiktokChannel';
+  const channelPrefix = activePlatform === 'kick' ? 'kick.com/' : 'tiktok.com/@';
+  const activeChannel = connectedChannels[activePlatform];
+  const applyVoicePreset = preset => {
+    const voice = chileanVoices[0] || selectedVoice;
+    if (!voice) {
+      notice('Instala una voz en español en tu dispositivo para usar este estilo.');
+      return;
+    }
+    patch('voice', voice.voiceURI);
+    patch('rate', preset.rate);
+    patch('pitch', preset.pitch);
+    notice(`${preset.name} aplicado. Guarda los cambios para conservarlo.`);
+  };
   if (page === 'Configuración') return <div className="account-shell" data-theme={theme}>
     <header className="account-header">
       <a className="brand" href="/" aria-label="Kivoz, inicio"><span className="brand-mark">k<span/></span>kivoz<span className="brand-dot">.</span></a>
@@ -380,6 +823,20 @@ function Studio({ user, onLogout }) {
           <form className="password-form" onSubmit={changeOwnPassword}><div className="field"><label htmlFor="current-password">Contraseña actual</label><input id="current-password" type="password" required autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)}/></div><div className="field"><label htmlFor="new-own-password">Nueva contraseña</label><input id="new-own-password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={newOwnPassword} onChange={event => setNewOwnPassword(event.target.value)} placeholder="Al menos 12 caracteres"/></div><button className="button secondary" disabled={changingPassword}>{changingPassword ? <LoaderCircle className="spin" size={16}/> : <ShieldCheck size={16}/>} Actualizar contraseña</button></form>
         </div>
       </section>
+      {user.role === 'admin' && <section className="card account-card admin-card piper-admin-card">
+        <div className="card-heading"><div className="section-title"><span className="section-icon"><AudioLines size={19}/></span><h2>Voces Plus+ · modelos Piper</h2></div><span className="tag">SOLO ADMINISTRACIÓN</span></div>
+        <p className="muted">Sube el modelo `.onnx` y su configuración `.onnx.json`. El navegador genera el audio localmente; el texto de los mensajes no se envía al servidor.</p>
+        <form className="piper-upload-form" onSubmit={uploadPiperVoice}>
+          <div className="field"><label htmlFor="piper-voice-name">Nombre para mostrar</label><input id="piper-voice-name" required maxLength={60} value={piperVoiceName} onChange={event => setPiperVoiceName(event.target.value)} placeholder="Español chileno"/></div>
+          <div className="field"><label htmlFor="piper-model-file">Modelo Piper (.onnx)</label><input ref={piperModelInputRef} id="piper-model-file" type="file" accept=".onnx" required onChange={event => setVoiceModelFile(event.target.files?.[0] || null)}/>{voiceModelFile && <small>{voiceModelFile.name} · {(voiceModelFile.size / 1024 / 1024).toFixed(1)} MB</small>}</div>
+          <div className="field"><label htmlFor="piper-config-file">Configuración (.onnx.json)</label><input ref={piperConfigInputRef} id="piper-config-file" type="file" accept=".onnx.json,application/json" required onChange={event => setVoiceConfigFile(event.target.files?.[0] || null)}/>{voiceConfigFile && <small>{voiceConfigFile.name} · {(voiceConfigFile.size / 1024).toFixed(0)} KB</small>}</div>
+          <button className="button primary" disabled={voiceUploading}>{voiceUploading ? <LoaderCircle className="spin" size={16}/> : <Plus size={16}/>} {voiceUploading ? `Subiendo ${voiceUploadProgress}%…` : 'Subir voz Piper'}</button>
+        </form>
+        {voiceUploading && <div className="piper-upload-progress" role="status"><progress max="90" value={voiceUploadProgress}/><span>Se carga en fragmentos para cuidar la conexión.</span></div>}
+        <p className="piper-storage-note">Límite por modelo: 120 MB. El archivo queda compartido mediante Netlify Blobs y cada dispositivo lo descarga al usar la voz. El control de tono del estudio no modifica voces Piper.</p>
+        <div className="user-list-heading"><strong>Modelos disponibles para las cuentas</strong><span>{uploadedVoices.length}</span></div>
+        <div className="managed-users">{uploadedVoices.map(voice => <div className="managed-user" key={voice.id}><span className="user-avatar"><AudioLines size={16}/></span><div><strong>{voice.name}</strong><small>{voice.language} · {(voice.modelSize / 1024 / 1024).toFixed(1)} MB · {voice.numSpeakers} {voice.numSpeakers === 1 ? 'voz' : 'voces'}</small></div><button className="icon-button danger-action" disabled={voiceDeleting === voice.id} aria-label={`Eliminar voz ${voice.name}`} onClick={() => removePiperVoice(voice)}>{voiceDeleting === voice.id ? <LoaderCircle className="spin" size={16}/> : <Trash2 size={17}/>}</button></div>)}{!uploadedVoices.length && <p className="muted">Todavía no hay modelos Piper compartidos.</p>}</div>
+      </section>}
       {user.role === 'admin' && <section className="card account-card admin-card"><div className="card-heading"><div className="section-title"><span className="section-icon"><Users size={19}/></span><h2>Administración de usuarios</h2></div><span className="tag">SOLO ADMINISTRACIÓN</span></div><p className="muted">Crea cuentas de usuario y elimina el acceso cuando sea necesario. Las cuentas nuevas no tienen permisos de administración.</p>
         <form className="create-user-form" onSubmit={createUser}><div className="field"><label htmlFor="new-username">Nombre de usuario</label><input id="new-username" required minLength={3} maxLength={32} pattern="[a-zA-Z0-9._-]{3,32}" autoComplete="off" value={newUsername} onChange={event => setNewUsername(event.target.value)} placeholder="3–32 letras, números, punto, guion"/></div><div className="field"><label htmlFor="new-password">Contraseña inicial</label><input id="new-password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="Al menos 12 caracteres"/></div><button className="button primary" disabled={creatingUser}>{creatingUser ? <LoaderCircle className="spin" size={16}/> : <UserPlus size={16}/>} Crear usuario</button></form>
         <div className="user-list-heading"><strong>Cuentas registradas</strong><span>{managedUsers.length}</span></div>{usersLoading ? <div className="user-loading"><LoaderCircle className="spin" size={17}/> Cargando usuarios…</div> : <div className="managed-users">{managedUsers.map(account => <div className="managed-user" key={account.id}><span className="user-avatar">{account.username.slice(0, 2).toUpperCase()}</span><div><strong>{account.username}</strong><small>{account.role === 'admin' ? 'Administrador' : 'Usuario'} · Desde {new Date(account.createdAt).toLocaleDateString('es')}</small></div>{account.role !== 'admin' && <button className="icon-button danger-action" aria-label={`Eliminar a ${account.username}`} onClick={() => removeUser(account)}><Trash2 size={17}/></button>}</div>)}{!managedUsers.length && !usersLoading && <p className="muted">Todavía no hay usuarios registrados.</p>}</div>}
@@ -387,28 +844,53 @@ function Studio({ user, onLogout }) {
     </main>
     {toast && <div className="toast" role="status"><CheckCheck size={18}/>{toast}<button onClick={() => setToast('')} aria-label="Cerrar notificación"><X size={15}/></button></div>}
   </div>;
-  const spanish = voices.filter(v => v.lang.startsWith('es'));
+  const spanish = voices.filter(v => v.lang.toLowerCase().replace('_', '-').startsWith('es'));
+  const chileanVoices = voices.filter(v => v.lang.toLowerCase().replace('_', '-').startsWith('es-cl'));
   const featured = [selectedVoice, ...spanish, ...voices].filter((v, i, a) => v && a.findIndex(x => x?.voiceURI === v.voiceURI) === i).slice(0, 3);
-  const Rules = () => <><div className="rule-grid"><div className="field"><label htmlFor="audience">Quién puede usar el comando</label><select id="audience" value={settings.audience} onChange={e => patch('audience', e.target.value)}><option value="all">Todos los espectadores</option><option value="subscribers">Suscriptores y moderadores</option><option value="moderators">Solo moderadores y broadcaster</option></select></div><div className="field"><label htmlFor="cooldown">Espera por usuario</label><div className="unit-input"><input id="cooldown" type="number" min="0" max="60" value={settings.cooldown} onChange={e => patch('cooldown', +e.target.value)}/><span>segundos</span></div></div><div className="field"><label htmlFor="maxLength">Longitud máxima</label><div className="unit-input"><input id="maxLength" type="number" min="20" max="500" value={settings.maxLength} onChange={e => patch('maxLength', +e.target.value)}/><span>caracteres</span></div></div><div className="field"><label htmlFor="blocked">Palabras bloqueadas</label><input id="blocked" placeholder="Separa las palabras con comas" value={settings.blocked} onChange={e => patch('blocked', e.target.value)}/></div></div><Toggle settings={settings} patch={patch} label="Omitir mensajes con enlaces" detail="Evita que se lean URLs durante el directo." prop="skipLinks"/><Toggle settings={settings} patch={patch} label="Omitir emotes de Kick" detail="Lee solo el texto, sin los códigos de los emotes." prop="skipEmotes"/></>;
-  const Activity = () => <div className="activity-list">{history.length ? history.map(m => <div className="activity-row" key={m.id}><div className="user-avatar">{m.user.slice(0,2).toUpperCase()}</div><div><strong>{m.user} <time>{m.time}</time></strong><p>{m.content}</p></div><span className={`message-state ${m.state === 'Leído' ? 'success' : ''}`}>{m.state}</span></div>) : <div className="empty"><MessageSquare size={28}/><strong>La conversación empieza aquí</strong><p>Conecta tu canal para ver los mensajes recibidos<br/>y saber cuáles pasan tus reglas de lectura.</p></div>}</div>;
+  const Rules = () => <><div className="rule-grid"><div className="field"><label htmlFor="audience">Quién puede usar el comando</label><select id="audience" value={settings.audience} onChange={e => patch('audience', e.target.value)}><option value="all">Todos los espectadores</option><option value="subscribers">Suscriptores y moderadores</option><option value="moderators">Solo moderadores y broadcaster</option></select></div><div className="field"><label htmlFor="cooldown">Espera por usuario</label><div className="unit-input"><input id="cooldown" type="number" min="0" max="60" value={settings.cooldown} onChange={e => patch('cooldown', +e.target.value)}/><span>segundos</span></div></div><div className="field"><label htmlFor="maxLength">Longitud máxima</label><div className="unit-input"><input id="maxLength" type="number" min="20" max="500" value={settings.maxLength} onChange={e => patch('maxLength', +e.target.value)}/><span>caracteres</span></div></div><div className="field"><label htmlFor="blocked">Palabras bloqueadas</label><input id="blocked" placeholder="Separa las palabras con comas" value={settings.blocked} onChange={e => patch('blocked', e.target.value)}/></div></div><Toggle settings={settings} patch={patch} label="Omitir mensajes con enlaces" detail="Evita que se lean URLs durante el directo." prop="skipLinks"/><Toggle settings={settings} patch={patch} label="Omitir emotes y stickers" detail="Lee solo el texto del comentario cuando la plataforma los incluye como etiquetas." prop="skipEmotes"/></>;
+  const Activity = () => <div className="activity-list">{history.length ? history.map(m => <div className="activity-row" key={m.id}><div className="user-avatar">{m.user.slice(0,2).toUpperCase()}</div><div><strong>{m.user} <span className={`activity-platform ${m.platform || 'kick'}`}>{m.platform === 'tiktok' ? 'TikTok' : 'Kick'}</span><time>{m.time}</time></strong><p>{m.content}</p></div><span className={`message-state ${m.state === 'Leído' ? 'success' : ''}`}>{m.state}</span></div>) : <div className="empty"><MessageSquare size={28}/><strong>La conversación empieza aquí</strong><p>Conecta tu canal para ver los mensajes recibidos<br/>y saber cuáles pasan tus reglas de lectura.</p></div>}</div>;
 
   return <div className="app-shell"><aside className="sidebar"><a className="brand" href="/" aria-label="Kivoz, inicio"><span className="brand-mark">k<span/></span>kivoz<span className="brand-dot">.</span></a><div className="workspace"><div className="workspace-icon"><Radio size={19}/></div><div><strong>Mi estudio</strong><span>Tu espacio de streaming</span></div><ChevronDown size={14}/></div><span className="nav-label">TU ESTUDIO</span><nav>{nav.map(({ name, icon: Icon }) => <button key={name} aria-label={name} title={name} aria-current={page === name ? 'page' : undefined} className={page === name ? 'active' : ''} onClick={() => setPage(name)}><Icon size={19}/>{name}{name === 'Panel general' && <span className="nav-dot"/>}</button>)}</nav><div className="sidebar-bottom"><div className="tip-card"><span className="tip-icon"><Headphones size={20}/></span><strong>Tu comunidad, en voz alta.</strong><p>Tú haces el directo.<br/>Nosotros ponemos la voz.</p><button onClick={() => setHelp(true)}>Cómo funciona <ArrowUpRight size={15}/></button></div><button aria-label="Configuración" title="Configuración" className={page === 'Configuración' ? 'side-action active' : 'side-action'} onClick={() => setPage('Configuración')}><Settings2 size={18}/>Configuración</button><button aria-label="Ayuda y primeros pasos" title="Ayuda y primeros pasos" className="side-action" onClick={() => setHelp(true)}><CircleHelp size={18}/>Ayuda y primeros pasos<ArrowUpRight size={14}/></button><div className="sidebar-footer"><span className="tiny-brand">K</span><span>Hecho para tu próximo directo</span></div></div></aside>
   <div className="main-wrap"><header className="topbar"><div><span className="breadcrumb-home">Mi estudio</span><ChevronRight size={13}/><span>{page}</span></div><div className="topbar-right"><span className="version">ESTUDIO v1.0</span><span className={`connection-badge ${status === 'online' ? 'online' : ''}`}><i/>{status === 'online' ? 'Canal conectado' : status === 'connecting' ? 'Conectando…' : 'Sin conexión'}</span><button className="profile" onClick={() => setPage('Configuración')} aria-label="Configuración del estudio">ME</button></div></header>
-  <main><section className="page-heading"><div><div className="eyebrow"><span/> TU ASISTENTE DE DIRECTO</div><h1>{page === 'Panel general' ? <>Tu chat tiene <span>voz.</span></> : page === 'Voces' ? <>Una voz muy <span>tuya.</span></> : page === 'Reglas de lectura' ? <>Tú pones las <span>reglas.</span></> : page === 'Actividad' ? <>El pulso de tu <span>chat.</span></> : <>Todo a tu <span>manera.</span></>}</h1><p>{page === 'Panel general' ? 'Conecta tu canal, elige una voz y deja que tu comunidad se escuche.' : page === 'Voces' ? 'Encuentra el sonido de tu comunidad con las voces de tu dispositivo.' : page === 'Reglas de lectura' ? 'Decide qué se lee y mantén el control de tu directo.' : page === 'Actividad' ? 'Todos los mensajes y sus estados, durante esta sesión.' : 'Personaliza la conexión y guarda tus preferencias para el próximo directo.'}</p></div><button aria-label="Guardar cambios" title="Guardar cambios" className="button secondary save-button" disabled={saving || !loaded} onClick={save}>{saving ? <LoaderCircle className="spin" size={16}/> : <Save size={16}/>} {saving ? 'Guardando…' : 'Guardar cambios'}{dirty && <i className="unsaved-dot"/>}</button></section>
+  <main><section className="page-heading"><div><div className="eyebrow"><span/> TU ASISTENTE DE DIRECTO</div><h1>{page === 'Panel general' ? <>Tu chat tiene <span>voz.</span></> : page === 'Voces' ? <>Una voz muy <span>tuya.</span></> : page === 'Reglas de lectura' ? <>Tú pones las <span>reglas.</span></> : page === 'Actividad' ? <>El pulso de tu <span>chat.</span></> : <>Todo a tu <span>manera.</span></>}</h1><p>{page === 'Panel general' ? 'Conecta tu canal, elige una voz y deja que tu comunidad se escuche.' : page === 'Voces' ? 'Elige entre las voces del dispositivo y los modelos compartidos.' : page === 'Reglas de lectura' ? 'Decide qué se lee y mantén el control de tu directo.' : page === 'Actividad' ? 'Todos los mensajes y sus estados, durante esta sesión.' : 'Personaliza la conexión y guarda tus preferencias para el próximo directo.'}</p></div><button aria-label="Guardar cambios" title="Guardar cambios" className="button secondary save-button" disabled={saving || !loaded} onClick={save}>{saving ? <LoaderCircle className="spin" size={16}/> : <Save size={16}/>} {saving ? 'Guardando…' : 'Guardar cambios'}{dirty && <i className="unsaved-dot"/>}</button></section>
   {error && <div className="error" role="alert"><CircleHelp size={17}/><span>{error}</span><button aria-label="Cerrar aviso" onClick={() => setError('')}><X size={16}/></button></div>}
-  {(page === 'Panel general' || page === 'Configuración') && <div className="connection-strip"><div className="kick-logo">K</div><div className="connection-copy"><strong>Tu canal de Kick</strong><span>{status === 'online' ? `Escuchando a la comunidad de ${connectedChannel}` : 'El punto de encuentro con tu comunidad'}</span></div><div className="channel-input"><span>kick.com/</span><input aria-label="Nombre de canal de Kick" placeholder="tu_canal" value={settings.channel} disabled={status !== 'offline' || !loaded} onChange={e => patch('channel', e.target.value.trim().replace(/^(https?:\/\/)?(www\.)?kick\.com\//i, '').split(/[/?#]/)[0])} onKeyDown={e => e.key === 'Enter' && connect()}/></div><button onClick={connect} disabled={!loaded} className={`button ${status === 'online' ? 'secondary' : 'primary'}`}>{status === 'connecting' ? <LoaderCircle size={16} className="spin"/> : <Link2 size={16}/>} {status === 'online' ? 'Desconectar' : status === 'connecting' ? 'Cancelar' : 'Conectar canal'}{status === 'offline' && <ArrowUpRight size={16}/>}</button></div>}
-  {page === 'Panel general' && <><div className="studio-grid"><section className="card voice-panel"><div className="card-heading"><div className="section-title"><span className="section-icon"><Mic2 size={18}/></span><h2>La voz de tu chat</h2></div><span className="tag">VOCES GRATIS</span></div><div className="subhead"><p>Elige quién le da vida a tus mensajes.</p><button className="text-button" onClick={() => setVoiceModal(true)}>Explorar voces <ArrowUpRight size={14}/></button></div><div className="voice-options">{featured.length ? featured.map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>) : <div className="voice-fallback"><AudioLines size={28}/><div><strong>Voz predeterminada en español</strong><p>El navegador carga las voces disponibles en tu dispositivo.</p></div><button className="icon-button" title="Actualizar voces" onClick={() => setVoices(window.speechSynthesis?.getVoices() || [])}><Radio size={17}/></button></div>}</div><div className="sliders"><Range settings={settings} patch={patch} label="Velocidad" prop="rate" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Tono" prop="pitch" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Volumen" prop="volume" min={0} max={1} step={.05} display={`${Math.round(settings.volume * 100)}%`}/></div><div className="voice-test"><input aria-label="Texto de prueba de voz" maxLength={300} value={testText} onChange={e => setTestText(e.target.value)} onKeyDown={e => e.key === 'Enter' && preview()}/><button onClick={preview}><Play size={14} fill="currentColor"/> Probar voz</button></div><div className="card-footnote"><Headphones size={13}/><span>La voz se reproduce en este navegador. Mantenlo abierto durante el directo.</span></div></section>
+  {(page === 'Panel general' || page === 'Configuración') && <>
+    <div className="platform-tabs" role="tablist" aria-label="Plataforma del chat">
+      <button role="tab" aria-selected={activePlatform === 'kick'} className={activePlatform === 'kick' ? 'selected' : ''} onClick={() => setActivePlatform('kick')}><span className="platform-mark kick-mark">K</span><span>Kick</span><i className={connectionStates.kick}/></button>
+      {user.role === 'admin' && <button role="tab" aria-selected={activePlatform === 'tiktok'} className={activePlatform === 'tiktok' ? 'selected' : ''} onClick={() => setActivePlatform('tiktok')}><span className="platform-mark tiktok-mark">♪</span><span>TikTok LIVE</span><i className={connectionStates.tiktok}/></button>}
+    </div>
+    <div className="connection-strip"><div className={`platform-logo ${activePlatform}`}>{activePlatform === 'kick' ? 'K' : '♪'}</div><div className="connection-copy"><strong>Tu canal de {activePlatform === 'kick' ? 'Kick' : 'TikTok LIVE'}</strong><span>{status === 'online' ? `Escuchando a la comunidad de ${activeChannel}` : 'Conecta el chat público de tu directo'}</span></div><div className="channel-input"><span>{channelPrefix}</span><input aria-label={`Nombre de canal de ${activePlatform === 'kick' ? 'Kick' : 'TikTok'}`} placeholder={activePlatform === 'kick' ? 'tu_canal' : 'tu_usuario'} value={settings[channelField]} disabled={status !== 'offline' || !loaded} onChange={e => patch(channelField, e.target.value.trim().replace(activePlatform === 'kick' ? /^(https?:\/\/)?(www\.)?kick\.com\//i : /^(https?:\/\/)?(www\.)?tiktok\.com\/@?/i, '').replace(/^@/, '').split(/[/?#]/)[0])} onKeyDown={e => e.key === 'Enter' && connect()}/></div><button onClick={connect} disabled={!loaded} className={`button ${status === 'online' ? 'secondary' : 'primary'}`}>{status === 'connecting' ? <LoaderCircle size={16} className="spin"/> : <Link2 size={16}/>} {status === 'online' ? 'Desconectar' : status === 'connecting' ? 'Cancelar' : 'Conectar canal'}{status === 'offline' && <ArrowUpRight size={16}/>}</button></div>
+  </>}
+  {page === 'Panel general' && <><div className="studio-grid"><section className="card voice-panel"><div className="card-heading"><div className="section-title"><span className="section-icon"><Mic2 size={18}/></span><h2>La voz de tu chat</h2></div><span className="tag">SISTEMA + PIPER</span></div><div className="subhead"><p>Elige quién le da vida a tus mensajes.</p><button className="text-button" onClick={() => setVoiceModal(true)}>Explorar voces <ArrowUpRight size={14}/></button></div><div className="voice-options">{featured.length ? featured.map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>) : <div className="voice-fallback"><AudioLines size={28}/><div><strong>Voz predeterminada en español</strong><p>El navegador carga las voces disponibles en tu dispositivo.</p></div><button className="icon-button" title="Actualizar voces" onClick={() => setVoices(window.speechSynthesis?.getVoices() || [])}><Radio size={17}/></button></div>}</div><div className="sliders"><Range settings={settings} patch={patch} label="Velocidad" prop="rate" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Tono" prop="pitch" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Volumen" prop="volume" min={0} max={1} step={.05} display={`${Math.round(settings.volume * 100)}%`}/></div><div className="voice-test"><input aria-label="Texto de prueba de voz" maxLength={300} value={testText} onChange={e => setTestText(e.target.value)} onKeyDown={e => e.key === 'Enter' && preview()}/><button onClick={preview}><Play size={14} fill="currentColor"/> Probar voz</button></div><div className="card-footnote"><Headphones size={13}/><span>La voz se reproduce en este navegador. Mantenlo abierto durante el directo.</span></div></section>
   <section className="card command-panel"><div className="card-heading"><div className="section-title"><span className="section-icon"><SlidersHorizontal size={18}/></span><h2>A tu manera</h2></div><span className="step-label">01 / AJUSTES</span></div><div className="field command-field"><label htmlFor="command">Comando de activación <span>PERSONALIZABLE</span></label><div className="command-input"><span>⌘</span><input id="command" value={settings.command} maxLength={20} onChange={e => patch('command', e.target.value.replace(/\s/g, ''))}/><span className="key-label">COMANDO</span></div><small>Solo se leen los mensajes que empiecen con este comando.</small></div><div className="chat-example"><span className="example-label">ASÍ LO USA TU CHAT</span><div><span className="example-user">tu_comunidad</span><p><b>{settings.command || '!aa'}</b> ¡Hola, streamer!</p></div></div><Toggle settings={settings} patch={patch} label="Leer nombre de usuario" detail="Antes de cada mensaje" prop="readName"/><button className="rules-link" onClick={() => setPage('Reglas de lectura')}><ShieldCheck size={16}/>Filtros y reglas de lectura<ArrowRight size={16}/></button></section></div>
   <div className="session-summary"><span><span className="session-dot"/> ESTA SESIÓN</span><div><MessageSquare size={15}/><strong>{readCount}</strong> mensajes leídos</div><div><ListFilter size={15}/><strong>{filtered}</strong> filtrados</div><div><AudioLines size={15}/><strong>{queue.length}</strong> en cola</div><span className="summary-note">Tu directo, bajo control.</span></div>
   <section className="card queue-panel"><div className="card-heading"><div className="section-title"><span className="section-icon"><AudioLines size={18}/></span><h2>Cola de lectura</h2><span className="count-badge">{queue.length}</span></div><div className="queue-actions"><button aria-label={paused ? 'Reanudar lectura' : 'Pausar lectura'} onClick={togglePause} className={paused ? 'is-paused' : ''}>{paused ? <Play size={14}/> : <Pause size={14}/>}<span>{paused ? 'Reanudar' : 'Pausar'}</span></button><button aria-label="Vaciar cola" onClick={clear} disabled={!queue.length}><Trash2 size={14}/><span>Vaciar cola</span></button></div></div><div className={`now-playing ${speaking && !paused ? 'playing' : ''}`}><div className="waveform">{Array.from({ length: 21 },(_,i) => <i key={i} style={{ '--h': `${8 + ((i * 13 + 11) % 30)}px`, '--delay': `${i * .06}s` }}/>)}</div><div className="playing-copy"><span>{speaking ? paused ? 'LECTURA EN PAUSA' : 'LEYENDO AHORA' : 'TODO LISTO PARA ESCUCHAR'}</span><strong>{speaking ? speaking.text : 'El próximo mensaje tiene la palabra.'}</strong><small>{speaking ? speaking.user : `Los mensajes con ${settings.command || '!aa'} aparecen aquí al conectar tu canal.`}</small></div><button className="skip-button" disabled={!speaking} aria-label="Saltar mensaje actual" onClick={skip}><SkipForward size={19}/></button></div>{queue.length > 0 && <div className="queued-messages">{queue.slice(0,5).map((m,i) => <div key={m.id}><span>{String(i + 1).padStart(2,'0')}</span><strong>{m.user}</strong><p>{m.text}</p><button aria-label={`Eliminar mensaje de ${m.user}`} onClick={() => { queueRef.current = queueRef.current.filter(x => x.id !== m.id); updateQueue(); setHistory(h => h.map(x => x.id === m.id ? { ...x, state: 'Eliminado' } : x)); }}><X size={15}/></button></div>)}{queue.length > 5 && <small>Y {queue.length - 5} mensajes más…</small>}</div>}<div className="queue-bottom"><span><ShieldCheck size={13}/> Filtrado antes de llegar a tus oídos</span><button onClick={() => setPage('Actividad')}>Ver actividad <ArrowRight size={13}/></button></div></section></>}
-  {page === 'Voces' && <section className="card standalone"><div className="card-heading"><div className="section-title"><Mic2 size={19}/><h2>Biblioteca de voces</h2></div><span className="tag">{voices.length} DISPONIBLES</span></div><p className="muted">Las voces varían según tu navegador y sistema operativo. Algunas requieren conexión a Internet.</p><input className="search" placeholder="Buscar por nombre o idioma…" aria-label="Buscar voces" value={search} onChange={e => setSearch(e.target.value)}/><div className="voice-library">{voices.filter(v => `${v.name} ${v.lang}`.toLowerCase().includes(search.toLowerCase())).map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>)}</div>{!voices.length && <p className="muted">No se han detectado voces. Instala voces en los ajustes de idioma de tu dispositivo o prueba Chrome o Edge.</p>}<div className="sliders"><Range settings={settings} patch={patch} label="Velocidad" prop="rate" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Tono" prop="pitch" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Volumen" prop="volume" min={0} max={1} step={.05} display={`${Math.round(settings.volume * 100)}%`}/></div><div className="voice-test"><input aria-label="Texto para probar voz" value={testText} maxLength={300} onChange={e => setTestText(e.target.value)}/><button onClick={preview}><Play size={14}/>Probar voz</button></div></section>}
+  {page === 'Voces' && <>
+    <section className="card standalone"><div className="card-heading"><div className="section-title"><Mic2 size={19}/><h2>Biblioteca de voces</h2></div><span className="tag">{voices.length} DISPONIBLES</span></div><p className="muted">Las voces del navegador y los modelos Piper se procesan localmente y están disponibles para Kick y TikTok.</p><input className="search" placeholder="Buscar por nombre o idioma…" aria-label="Buscar voces" value={search} onChange={e => setSearch(e.target.value)}/><div className="voice-library">{voices.filter(v => `${v.name} ${v.lang}`.toLowerCase().includes(search.toLowerCase())).map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>)}</div>{!voices.length && <p className="muted">No se han detectado voces. Instala una voz en tu dispositivo o solicita al administrador un modelo Piper.</p>}<div className="sliders"><Range settings={settings} patch={patch} label="Velocidad" prop="rate" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Tono" prop="pitch" min={.5} max={2} step={.1}/><Range settings={settings} patch={patch} label="Volumen" prop="volume" min={0} max={1} step={.05} display={`${Math.round(settings.volume * 100)}%`}/></div><div className="voice-test"><input aria-label="Texto para probar voz" value={testText} maxLength={300} onChange={e => setTestText(e.target.value)}/><button onClick={preview}><Play size={14}/>Probar voz</button></div></section>
+    <section className="card standalone voice-plus-panel"><div className="card-heading"><div className="section-title"><span className="plus-mark"><Plus size={15}/></span><h2>Voces Plus+</h2></div><span className="tag">CHILE · es-CL</span></div><p className="muted">Voces en español chileno que ya están instaladas en este dispositivo. Los estilos aplican ritmo y tono a tu voz seleccionada; no son clones de voces reales.</p><div className="voice-presets">{[{ name: 'Locución chilena', rate: 1, pitch: 1 }, { name: 'Meme rápido', rate: 1.35, pitch: 1.15 }, { name: 'Narración dramática', rate: .82, pitch: .88 }].map(preset => <button key={preset.name} className="voice-preset" onClick={() => applyVoicePreset(preset)}><strong>{preset.name}</strong><small>{chileanVoices.length ? 'Usa una voz es-CL disponible' : 'Usa una voz en español disponible'}</small></button>)}</div>{chileanVoices.length ? <div className="voice-library">{chileanVoices.map((voice,index) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={voice.voiceURI} voice={voice} index={index}/>)}</div> : <div className="info-box"><AudioLines size={19}/><p>Este navegador no informa voces `es-CL` instaladas. Revisa las opciones de voz de tu sistema y vuelve a cargar la página; la disponibilidad depende del dispositivo.</p></div>}<p className="voice-licensing-note">No se incluyen clones ni imitaciones de famosos o personas reales.</p></section>
+    <section className="card standalone voice-rules-panel"><div className="card-heading"><div className="section-title"><span className="section-icon"><Crown size={19}/></span><h2>Voces por usuario y rol</h2></div><span className="tag">{user.role === 'admin' ? 'KICK + TIKTOK' : 'KICK'}</span></div><p className="muted">Asigna una voz a un usuario, moderadores, suscriptores o personas que hayan enviado regalos. La coincidencia por usuario tiene prioridad; los regalos de TikTok se reconocen durante esta sesión.</p>
+      <form className="voice-rule-form" onSubmit={addVoiceRule}>
+        <div className="field"><label htmlFor="voice-rule-platform">Plataforma</label><select id="voice-rule-platform" value={rulePlatform} onChange={e => setRulePlatform(e.target.value)}>{user.role === 'admin' && <option value="all">Kick y TikTok</option>}<option value="kick">Solo Kick</option>{user.role === 'admin' && <option value="tiktok">Solo TikTok</option>}</select></div>
+        <div className="field"><label htmlFor="voice-rule-type">Aplicar a</label><select id="voice-rule-type" value={ruleType} onChange={e => { setRuleType(e.target.value); setRuleValue(''); }}><option value="username">Usuario específico</option><option value="role">Rol (moderador o streamer)</option><option value="subscriber">Suscriptor</option><option value="donor">Donador / regalador</option></select></div>
+        {ruleType === 'username' && <div className="field"><label htmlFor="voice-rule-value">Nombre de usuario</label><input id="voice-rule-value" required minLength={1} maxLength={32} value={ruleValue} onChange={e => setRuleValue(e.target.value.replace(/^@/, ''))} placeholder="usuario"/></div>}
+        {ruleType === 'role' && <div className="field"><label htmlFor="voice-rule-value">Rol</label><select id="voice-rule-value" required value={ruleValue} onChange={e => setRuleValue(e.target.value)}><option value="">Elige un rol</option><option value="moderator">Moderador</option><option value="broadcaster">Streamer</option></select></div>}
+        <div className="field"><label htmlFor="voice-rule-voice">Voz asignada</label><select id="voice-rule-voice" required value={ruleVoice} onChange={e => setRuleVoice(e.target.value)}><option value="">Elige una voz</option>{voices.map(voice => <option key={voice.voiceURI} value={voice.voiceURI}>{voice.name} · {voice.lang}</option>)}</select></div>
+        <button className="button primary"><Plus size={16}/>Añadir regla</button>
+      </form>
+      <div className="voice-rule-list">{(settings.voiceRules || []).map(rule => {
+        const voice = voices.find(item => item.voiceURI === rule.voice);
+        const target = rule.type === 'username' ? `@${rule.value}` : rule.type === 'role' ? (rule.value === 'moderator' ? 'Moderadores' : 'Streamer') : rule.type === 'subscriber' ? 'Suscriptores' : 'Donadores / regaladores';
+        return <div className="voice-rule-row" key={rule.id}><span className="rule-target">{target}</span><span className="rule-platform">{rule.platform === 'all' ? 'Kick + TikTok' : rule.platform === 'kick' ? 'Kick' : 'TikTok'}</span><strong>{voice?.name || 'Voz no disponible'}</strong><button className="icon-button danger-action" aria-label={`Eliminar regla para ${target}`} onClick={() => removeVoiceRule(rule.id)}><Trash2 size={16}/></button></div>;
+      })}{!(settings.voiceRules || []).length && <p className="muted">Todavía no hay asignaciones personalizadas.</p>}</div>
+    </section>
+  </>}
   {page === 'Reglas de lectura' && <section className="card standalone"><div className="card-heading"><div className="section-title"><ShieldCheck size={19}/><h2>Un chat que suena bien</h2></div><span className="tag">MODERACIÓN</span></div><p className="muted">Los cambios se aplican a los nuevos mensajes. La cola admite hasta 50 mensajes.</p>{Rules()}</section>}
   {page === 'Actividad' && <section className="card standalone"><div className="card-heading"><div className="section-title"><MessageSquare size={19}/><h2>Mensajes de la sesión</h2></div><span className="tag">{history.length} RECIENTES</span></div>{Activity()}</section>}
-  {page === 'Configuración' && <section className="card standalone"><div className="card-heading"><div className="section-title"><Settings2 size={19}/><h2>Preferencias del estudio</h2></div></div><div className="rule-grid"><div className="field"><label htmlFor="settings-command">Comando de lectura</label><input id="settings-command" maxLength={20} value={settings.command} onChange={e => patch('command', e.target.value.replace(/\s/g,''))}/></div><div className="field"><label>Voz seleccionada</label><button className="button secondary" onClick={() => setVoiceModal(true)}>{voiceName}<ChevronDown size={15}/></button></div></div><Toggle settings={settings} patch={patch} label="Leer nombre de usuario" detail="Anuncia quién envía cada mensaje." prop="readName"/><div className="info-box"><ShieldCheck size={20}/><p>Los ajustes se guardan para este navegador mediante una cookie privada. La actividad y la cola son temporales y se vacían al cerrar o recargar la página.</p></div><button className="button secondary" onClick={() => { changed.current = true; setSettings(defaults); setDirty(true); notice('Preferencias restablecidas. Guarda los cambios para conservarlas.'); }}>Restablecer preferencias</button></section>}
-  <footer className="main-footer"><span><i/> Menos distracciones. Más comunidad.</span><span>Creado para streamers de <b>KICK</b><ArrowUpRight size={12}/></span></footer></main></div>
+  {page === 'Configuración' && <section className="card standalone"><div className="card-heading"><div className="section-title"><Settings2 size={19}/><h2>Preferencias del estudio</h2></div></div><div className="rule-grid"><div className="field"><label htmlFor="settings-command">Comando de lectura</label><input id="settings-command" maxLength={20} value={settings.command} onChange={e => patch('command', e.target.value.replace(/\s/g,''))}/></div><div className="field"><label>Voz seleccionada</label><button className="button secondary" onClick={() => setVoiceModal(true)}>{voiceName}<ChevronDown size={15}/></button></div></div><Toggle settings={settings} patch={patch} label="Leer nombre de usuario" detail="Anuncia quién envía cada mensaje." prop="readName"/><div className="info-box"><ShieldCheck size={20}/><p>Los ajustes y el tema se guardan en tu cuenta. La actividad y la cola son temporales y se vacían al cerrar o recargar la página.</p></div><button className="button secondary" onClick={() => { changed.current = true; setSettings(defaults); setDirty(true); notice('Preferencias restablecidas. Guarda los cambios para conservarlas.'); }}>Restablecer preferencias</button></section>}
+  <footer className="main-footer"><span><i/> Menos distracciones. Más comunidad.</span><span>Creado para streamers de <b>KICK + TIKTOK</b><ArrowUpRight size={12}/></span></footer></main></div>
   {toast && <div className="toast" role="status"><CheckCheck size={18}/>{toast}<button onClick={() => setToast('')} aria-label="Cerrar notificación"><X size={15}/></button></div>}
-  {voiceModal && <div className="modal-backdrop" onClick={() => setVoiceModal(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="voice-modal-title" onClick={e => e.stopPropagation()}><div className="card-heading"><div><h2 id="voice-modal-title">Encuentra tu voz</h2><p className="muted">Voces disponibles en tu dispositivo.</p></div><button autoFocus className="icon-button" aria-label="Cerrar voces" onClick={() => setVoiceModal(false)}><X size={20}/></button></div><input className="search" placeholder="Buscar por nombre o idioma…" aria-label="Buscar voz" value={search} onChange={e => setSearch(e.target.value)}/><div className="voice-library">{voices.filter(v => `${v.name} ${v.lang}`.toLowerCase().includes(search.toLowerCase())).map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>)}</div>{!voices.length && <p className="muted">Tu navegador aún no tiene voces disponibles. Prueba con Chrome o Edge e instala un idioma de voz en los ajustes del sistema.</p>}<button className="button primary modal-done" onClick={() => setVoiceModal(false)}><Check size={16}/>Usar esta voz</button></section></div>}
-  {help && <div className="modal-backdrop" onClick={() => setHelp(false)}><section className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e => e.stopPropagation()}><div className="card-heading"><h2 id="help-title">Tu primer directo con Kivoz</h2><button autoFocus className="icon-button" aria-label="Cerrar ayuda" onClick={() => setHelp(false)}><X size={20}/></button></div><ol><li><strong>Conecta tu comunidad</strong><p>Introduce el nombre del canal de Kick y pulsa Conectar canal. No necesitas compartir tu contraseña.</p></li><li><strong>Dale tu toque</strong><p>Elige una voz, ajusta el tono y prueba el audio. El comando inicial es !aa y puedes cambiarlo cuando quieras.</p></li><li><strong>Deja que hable el chat</strong><p>Un mensaje como «!aa ¡Hola!» se añade a la cola. Mantén esta pestaña abierta y con sonido. Usa OBS para capturar el audio del navegador si lo quieres en tu directo.</p></li></ol><div className="info-box"><CircleHelp size={20}/><p>La conexión utiliza el chat público de Kick y puede verse limitada si Kick cambia o bloquea su acceso. Si no se conecta, aparece un aviso; no se simulan mensajes. La lectura requiere un navegador compatible con Web Speech.</p></div><button className="button primary" onClick={() => setHelp(false)}>Todo listo <ArrowRight size={16}/></button></section></div>}
+  {voiceModal && <div className="modal-backdrop" onClick={() => setVoiceModal(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="voice-modal-title" onClick={e => e.stopPropagation()}><div className="card-heading"><div><h2 id="voice-modal-title">Encuentra tu voz</h2><p className="muted">Voces del dispositivo y modelos compartidos.</p></div><button autoFocus className="icon-button" aria-label="Cerrar voces" onClick={() => setVoiceModal(false)}><X size={20}/></button></div><input className="search" placeholder="Buscar por nombre o idioma…" aria-label="Buscar voz" value={search} onChange={e => setSearch(e.target.value)}/><div className="voice-library">{voices.filter(v => `${v.name} ${v.lang}`.toLowerCase().includes(search.toLowerCase())).map((v,i) => <VoiceCard selectedVoice={selectedVoice} patch={patch} key={v.voiceURI} voice={v} index={i}/>)}</div>{!voices.length && <p className="muted">Tu navegador aún no tiene voces disponibles. Prueba Chrome o Edge o solicita al administrador un modelo Piper.</p>}<button className="button primary modal-done" onClick={() => setVoiceModal(false)}><Check size={16}/>Usar esta voz</button></section></div>}
+  {help && <div className="modal-backdrop" onClick={() => setHelp(false)}><section className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e => e.stopPropagation()}><div className="card-heading"><h2 id="help-title">Tu primer directo con Kivoz</h2><button autoFocus className="icon-button" aria-label="Cerrar ayuda" onClick={() => setHelp(false)}><X size={20}/></button></div><ol><li><strong>Conecta tu comunidad</strong><p>Elige Kick o TikTok LIVE, introduce el usuario del canal y pulsa Conectar canal. No necesitas compartir credenciales.</p></li><li><strong>Dale tu toque</strong><p>Elige una voz, ajusta el tono y prueba el audio. El comando inicial es !aa y puedes cambiarlo cuando quieras.</p></li><li><strong>Deja que hable el chat</strong><p>Un mensaje como «!aa ¡Hola!» se añade a la cola. Mantén esta pestaña abierta y con sonido. Usa OBS para capturar el audio del navegador si lo quieres en tu directo.</p></li></ol><div className="info-box"><CircleHelp size={20}/><p>Kick y TikTok LIVE pueden cambiar o restringir sus conexiones públicas. TikTok necesita el puente Node configurado; no se simulan mensajes. La lectura requiere un navegador compatible con Web Speech.</p></div><button className="button primary" onClick={() => setHelp(false)}>Todo listo <ArrowRight size={16}/></button></section></div>}
   </div>;
 }
 
